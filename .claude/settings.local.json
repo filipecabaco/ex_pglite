@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(mix deps.get:*)",
+      "Bash(mkdir:*)",
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(npm pack:*)",
+      "Bash(tar:*)",
+      "Bash(cp:*)",
+      "Bash(mix test)",
+      "Bash(mix deps.tree:*)",
+      "WebFetch(domain:hexdocs.pm)",
+      "Bash(mix test:*)",
+      "Bash(iex:*)",
+      "Bash(mix compile)",
+      "Bash(wasm-objdump:*)",
+      "WebSearch",
+      "Bash(grep:*)",
+      "Bash(bun run:*)",
+      "Bash(bun test:*)",
+      "Bash(bun install:*)",
+      "Bash(bun update:*)",
+      "Bash(bun:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,0 +1,17 @@
+{
+    "name": "pglite-elixir",
+    "version": "0.1.0",
+    "description": "Bun runtime for PGLite operations",
+    "main": "priv/bun/pglite_runner.js",
+    "scripts": {
+        "dev": "bun run priv/bun/pglite_runner.js",
+        "test": "bun test"
+    },
+    "dependencies": {
+        "@electric-sql/pglite": "^0.3.7"
+    },
+    "devDependencies": {
+        "bun-types": "latest"
+    },
+    "type": "module"
+}
