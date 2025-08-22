@@ -7,15 +7,40 @@ defmodule Pglite.MixProject do
       version: "0.1.0",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      package: package(),
+      description: "Elixir library for PGLite - lightweight PostgreSQL with Postgrex integration"
+    ]
+  end
+
+  defp package do
+    [
+      name: "pglite",
+      files: [
+        "lib",
+        "priv",
+        "mix.exs",
+        "README.md",
+        "LICENSE",
+        "SHIPPING.md",
+        # Include any versioned optimized files
+        "pglite_optimized_*.ts",
+        "pglite.wasm",
+        "pglite.data"
+      ],
+      maintainers: ["Your Name"],
+      licenses: ["MIT"],
+      links: %{
+        "GitHub" => "https://github.com/your-org/pglite",
+        "Docs" => "https://hexdocs.pm/pglite"
+      }
     ]
   end
 
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger],
-      mod: {Pglite.Application, []}
+      extra_applications: [:logger]
     ]
   end
 
@@ -23,7 +48,7 @@ defmodule Pglite.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
-      {:postgres_replication, git: "https://github.com/filipecabaco/postgres_replication.git"}
+      {:postgrex, "~> 0.21"}
     ]
   end
 end

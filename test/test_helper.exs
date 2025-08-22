@@ -18,5 +18,6 @@ end
 
 # Clean up leftover test directories before starting tests
 TestCleanup.cleanup_leftover_test_dirs()
-System.cmd("pkill", ["-f", "bun.*pglite_runner"])
+System.cmd("pkill", ["-f", "bun.*pglite_socket_server"])
+
 ExUnit.start(capture_log: true)
