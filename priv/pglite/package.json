@@ -1,0 +1,5 @@
+{ "dependencies": { "@electric-sql/pglite": "^0.3.7", "@electric-sql/pglite-socket": "^0.0.12" }, "name": "bun", "module": "index.ts", "type": "module", "devDependencies": {
+  "@types/bun": "latest"
+}, "peerDependencies": {
+  "typescript": "^5.0.0"
+} }

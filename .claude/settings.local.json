@@ -23,7 +23,8 @@
       "Bash(bun install:*)",
       "Bash(bun update:*)",
       "Bash(bun:*)",
-      "Bash(mix run:*)"
+      "Bash(mix run:*)",
+      "Bash(lsof:*)"
     ],
     "deny": [],
     "ask": []

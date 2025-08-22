@@ -9,8 +9,21 @@ defmodule Pglite.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       package: package(),
-      description: "Elixir library for PGLite - lightweight PostgreSQL with Postgrex integration"
+      description: "Elixir library for PGLite - lightweight PostgreSQL with Postgrex integration",
+      aliases: aliases()
     ]
+  end
+
+  defp aliases do
+    [
+      "build.assets": &build_assets/1
+    ]
+  end
+
+  defp build_assets(_args) do
+    # Load and run the build module
+    Code.require_file("scripts/build_assets.ex")
+    Pglite.BuildAssets.build_and_move()
   end
 
   defp package do
@@ -24,7 +37,7 @@ defmodule Pglite.MixProject do
         "LICENSE",
         "SHIPPING.md",
         # Include any versioned optimized files
-        "pglite_optimized_*.ts",
+        "index.js",
         "pglite.wasm",
         "pglite.data"
       ],

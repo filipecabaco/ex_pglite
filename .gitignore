@@ -21,6 +21,6 @@ pglite-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
-/node_modules
+/priv/bun/node_modules
 .vscode
 .DS_Store

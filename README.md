@@ -1,142 +1,35 @@
 # PGLite
 
-An Elixir library that provides a simple interface to [PGLite](https://github.com/electric-sql/pglite) using Bun runtime. PGLite is a lightweight PostgreSQL database that runs entirely in memory or with persistence, perfect for local development, testing, and applications that need an embedded PostgreSQL database.
+A lightweight Elixir library that provides PostgreSQL functionality through PGLite, a WebAssembly-based PostgreSQL implementation. This library offers a simple and efficient way to run PostgreSQL databases in your Elixir applications without requiring a full PostgreSQL server installation.
 
 ## Features
 
-- **Direct Postgrex Integration**: Returns standard Postgrex connection PIDs - use with any Postgrex function
-- **Unix Domain Sockets**: High-performance IPC communication between Elixir and Bun processes
-- **Process Isolation**: Each database runs in its own Bun process for better concurrency
-- **Memory & Persistent Databases**: Support for both in-memory and file-based databases
-- **Automatic Cleanup**: Proper resource management with automatic process and socket cleanup
-- **Multiple Instances**: Run multiple concurrent PGLite databases simultaneously
-- **Self-Contained**: Automatically builds and bundles JavaScript dependencies on first use
-- **Zero External Setup**: No need to manually install or manage JavaScript dependencies
-- **Production Ready**: Comprehensive test suite with robust error handling
+- **Lightweight**: No need for a full PostgreSQL server installation
+- **WebAssembly-based**: Runs PGLite in a Bun runtime environment
+- **Socket-based communication**: Uses Unix domain sockets for efficient local communication
+- **Postgrex integration**: Seamlessly integrates with the popular Postgrex library
+- **Multiple instances**: Support for running multiple database instances simultaneously
+- **Memory and file-based storage**: Choose between in-memory or persistent file storage
+- **Transaction support**: Full ACID transaction capabilities
+- **Cross-platform**: Works on macOS, Linux, and Windows (with WSL)
 
-## Architecture
+## Prerequisites
 
-PGLite uses a Unix domain socket architecture where each database connection runs in its own Bun process:
+- **Bun**: A fast JavaScript runtime that executes the PGLite WebAssembly code
+- **Elixir**: Version 1.18 or later
 
-```
-┌─────────────────┐    Unix Socket    ┌─────────────────┐    ┌─────────────────┐
-│   Elixir App    │ ◄──────────────► │   Bun Process   │ ◄─► │     PGLite      │
-│                 │                   │                 │    │   (Database)    │
-│ Postgrex Client │                   │ Socket Server   │    │                 │
-└─────────────────┘                   └─────────────────┘    └─────────────────┘
-```
-
-### Key Components
-
-- **Bun Runtime**: Uses [Bun](https://bun.sh/) as the JavaScript runtime for executing PGLite
-- **Unix Domain Sockets**: High-performance IPC communication between Elixir and Bun processes
-- **Process Isolation**: Each database runs in its own isolated Bun process for better concurrency
-- **Postgrex Integration**: Standard PostgreSQL wire protocol via Unix sockets
-- **Automatic Resource Management**: Proper cleanup of processes and socket files
-
-### How It Works
-
-1. **Auto-Bundle** *(first run only)*: Automatically builds self-contained JavaScript bundle with PGLite dependencies
-2. **Startup**: `Pglite.start_link/1` spawns a Bun process running the PGLite socket server
-3. **Socket Creation**: Bun creates a Unix domain socket and initializes the PGLite database
-4. **Connection**: Postgrex connects to the Unix socket using standard PostgreSQL protocol
-5. **Database Operations**: Use standard Postgrex functions (`query/3`, `transaction/2`, etc.)
-6. **Cleanup**: Automatic termination of Bun processes and socket cleanup on shutdown
-
-## Usage
-
-### Basic Usage
-
-```elixir
-{:ok, {manager, conn}} = Pglite.start_link()
-
-{:ok, _} = Postgrex.query(conn, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", [])
-{:ok, _} = Postgrex.query(conn, "INSERT INTO users (id, name) VALUES ($1, $2)", [0, "Alice"])
-{:ok, result} = Postgrex.query(conn, "SELECT * FROM users", [])
-
-:ok = GenServer.stop(manager)
-```
-
-### Database Types
-
-```elixir
-
-{:ok, {manager, conn}} = Pglite.start_link()
-{:ok, {manager, conn}} = Pglite.start_link(memory: true)
-{:ok, {manager, conn}} = Pglite.start_link(data_dir: "/tmp/my_database")
-```
-
-### Multiple Instances
-
-```elixir
-# Run multiple databases concurrently
-{:ok, {manager1, conn1}} = Pglite.start_link(data_dir: "/tmp/db1")
-{:ok, {manager2, conn2}} = Pglite.start_link(data_dir: "/tmp/db2")
-
-# Each database is completely isolated
-Postgrex.query(conn1, "CREATE TABLE users (id INTEGER, name TEXT)", [])
-Postgrex.query(conn2, "CREATE TABLE orders (id INTEGER, user_id INTEGER)", [])
-
-# Clean up
-Pglite.stop(manager1)
-Pglite.stop(manager2)
-```
-
-### Transactions
-
-```elixir
-{:ok, {manager, conn}} = Pglite.start_link()
-
-Postgrex.transaction(conn, fn(conn) ->
-  {:ok, _} = Postgrex.query(conn, "CREATE TABLE accounts (id INTEGER, balance INTEGER)", [])
-  {:ok, _} = Postgrex.query(conn, "INSERT INTO accounts VALUES (1, 1000), (2, 500)", [])
-
-  # Transfer money between accounts
-  {:ok, _} = Postgrex.query(conn, "UPDATE accounts SET balance = balance - $1 WHERE id = 1", [100])
-  {:ok, _} = Postgrex.query(conn, "UPDATE accounts SET balance = balance + $1 WHERE id = 2", [100])
-
-  :ok
-end)
-```
-
-## Technical Details
-
-### Unix Socket Communication
-
-The library uses the PostgreSQL wire protocol over Unix domain sockets:
-
-- **Bun Side**: Uses `@electric-sql/pglite-socket` to create a PostgreSQL-compatible socket server
-- **Elixir Side**: Standard Postgrex client connects to the Unix socket as if it were a regular PostgreSQL server
-- **Protocol**: Full PostgreSQL wire protocol support (queries, transactions, prepared statements, etc.)
-- **Performance**: Unix sockets provide lower latency than TCP for local communication
-
-### Process Isolation & Multi-Instance Support
-
-- Each Bun process has its own isolated memory space and Unix socket
-- Multiple instances can run concurrently with different databases
-- Automatic socket cleanup when connections are closed
-- Process supervision for fault tolerance
-- Support for both in-memory and persistent databases
-
-### Socket Management
+### Installing Bun
 
 ```bash
-# Socket files are created in a temporary directory
-/tmp/pglite_sockets/
-├── pglite_12345.sock  # Instance 1
-├── pglite_12346.sock  # Instance 2
-└── pglite_12347.sock  # Instance 3
+# macOS and Linux
+curl -fsSL https://bun.sh/install | bash
+
+# Windows (with WSL)
+curl -fsSL https://bun.sh/install | bash
+
+# Verify installation
+bun --version
 ```
-
-### Dependencies
-
-#### Elixir Dependencies
-- `postgrex` - PostgreSQL driver for Elixir
-- `jason` - JSON encoding/decoding for communication with Bun process
-
-#### JavaScript Dependencies (via Bun)
-- `@electric-sql/pglite` - The core PGLite database
-- `@electric-sql/pglite-socket` - Socket server for PostgreSQL wire protocol
 
 ## Installation
 
@@ -150,106 +43,292 @@ def deps do
 end
 ```
 
-### Self-Contained Setup with Version Management
-
-PGLite automatically manages its JavaScript dependencies with intelligent version-based caching:
-
-1. **Version Detection**: Automatically detects versions of `@electric-sql/pglite`, `@electric-sql/pglite-socket`, and `bun`
-2. **Smart Caching**: Creates versioned optimized bundles (e.g., `pglite_optimized_9fc217d9.ts`) for cache invalidation
-3. **Auto-Build**: Detects missing or outdated bundles and automatically builds them using `bun build`
-4. **Dependency Resolution**: Automatically installs required npm packages when needed
-5. **Bundle Creation**: Creates optimized, self-contained JavaScript bundle with all dependencies
-6. **Asset Management**: Copies required WebAssembly files (`pglite.wasm`, `pglite.data`) to the correct location
-7. **Cache Invalidation**: Automatically rebuilds when dependency versions change
-8. **Cleanup**: Removes outdated versions to keep the project clean
-
-No manual JavaScript setup required - just add the Elixir dependency and start using it!
-
-## Prerequisites
-
-- [Bun](https://bun.sh/) runtime (for executing PGLite)
-- Elixir 1.18 or later
-- Unix-like operating system (for Unix domain sockets)
-- Internet connection (for initial JavaScript dependency installation)
-
-## Development
+Then install your dependencies:
 
 ```bash
-# Install Elixir dependencies
 mix deps.get
-
-# Install JavaScript dependencies via Bun (for development)
-bun install
-
-# Run tests (versioned optimized bundle will be built automatically on first test run)
-mix test
-
-# Run tests with coverage
-mix test --cover
-
-# Build optimized bundle manually
-mix pglite.build
-
-# Force rebuild of optimized bundle
-mix pglite.build --force
-
-# Prepare package for distribution
-mix pglite.package
-
-# Clean up any orphaned processes and socket files (if needed)
-./scripts/cleanup_pglite.sh
 ```
 
-### Development Notes
+## Quick Start
 
-- The versioned JavaScript bundle is automatically built when needed - no manual build step required
-- For development, you can install JavaScript dependencies with `bun install`, but it's not required for normal usage
-- The bundle includes all necessary dependencies and WebAssembly files for self-contained operation
-- Version-based caching ensures rebuilds only happen when dependencies actually change
-- Use `mix pglite.build --force` to force a rebuild during development
-- Use `mix pglite.package` to prepare and validate the complete package for distribution
+### Basic Usage
 
-## API Reference
+```elixir
+# Start a PGLite instance
+{:ok, manager} = Pglite.start_link()
 
-### `Pglite.start_link/1`
+# Get connection options for Postgrex
+opts = Pglite.get_connection_opts(manager)
 
-Starts a new PGLite instance and returns `{:ok, {manager_pid, postgrex_pid}}`.
+# Connect with Postgrex
+{:ok, conn} = Postgrex.start_link(opts)
 
-**Options:**
-- `:data_dir` - Directory for persistent database (default: in-memory)
-- `:memory` - Force in-memory database (overrides `:data_dir`)
-- `:name` - Name for the GenServer process
+# Execute queries
+{:ok, result} = Postgrex.query(conn, "SELECT 1 as test", [])
+IO.inspect(result.rows) # [[1]]
 
-### `Pglite.stop/1`
+# Clean up
+GenServer.stop(conn)
+GenServer.stop(manager)
+```
 
-Stops a PGLite instance using the manager PID.
+### With Custom Configuration
 
-### `Pglite.health_check/1`
+```elixir
+{:ok, manager} = Pglite.start_link(
+  database: "myapp",
+  username: "user",
+  password: "password",
+  data_dir: "tmp/myapp_data",
+  timeout: 10_000
+)
+```
 
-Convenience function to check if the database connection is healthy.
+### Multiple Instances
 
-## Use Cases
+```elixir
+# Start multiple instances with different data directories
+{:ok, manager1} = Pglite.start_link(data_dir: "tmp/app1_data")
+{:ok, manager2} = Pglite.start_link(data_dir: "tmp/app2_data")
 
-PGLite is perfect for scenarios where you need a lightweight PostgreSQL database without the overhead of a full PostgreSQL server:
+# Each instance operates independently
+opts1 = Pglite.get_connection_opts(manager1)
+opts2 = Pglite.get_connection_opts(manager2)
 
-### Development & Testing
-- **Unit Tests**: Fast, isolated database instances for each test
-- **Integration Tests**: Full PostgreSQL compatibility without external dependencies
-- **Local Development**: Embedded database for prototyping and development
+{:ok, conn1} = Postgrex.start_link(opts1)
+{:ok, conn2} = Postgrex.start_link(opts2)
+```
 
-### Applications
-- **Desktop Applications**: Embedded database that doesn't require PostgreSQL installation
-- **Edge Computing**: Lightweight database for resource-constrained environments
-- **Microservices**: Each service can have its own embedded database instance
-- **Data Processing**: Temporary databases for ETL operations and data transformations
+## Architecture
 
-### Benefits over Traditional PostgreSQL
-- **No Installation Required**: Runs entirely within your Elixir application
-- **Zero Configuration**: No database servers to manage or configure
-- **Process Isolation**: Each database runs in its own process
-- **Memory Efficient**: In-memory databases for temporary data
-- **Fast Startup**: Databases start in milliseconds, not seconds
+PGLite uses a client-server architecture where:
+
+1. **Elixir Process**: Manages the PGLite lifecycle and provides connection options
+2. **Bun Runtime**: Executes the PGLite WebAssembly code
+3. **Socket Communication**: Uses Unix domain sockets for efficient local communication
+4. **Postgrex Integration**: Standard PostgreSQL client library for database operations
+
+### How It Works
+
+1. When you start a PGLite instance, it spawns a Bun process running the PGLite socket server
+2. The socket server creates a Unix domain socket in a temporary directory
+3. Connection options are returned that include the socket path
+4. Postgrex connects to the socket using standard PostgreSQL protocol
+5. All database operations go through the socket to the PGLite WebAssembly instance
+
+## Configuration Options
+
+### PGLite Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `database` | `String` | `"postgres"` | Database name |
+| `username` | `String` | `"postgres"` | Username for authentication |
+| `password` | `String` | `"password"` | Password for authentication |
+| `data_dir` | `String` | `"tmp/<random>"` | Directory for database files |
+| `memory` | `boolean` | `true` | Use in-memory storage when true |
+| `timeout` | `integer` | `5000` | Startup timeout in milliseconds |
+| `bun_executable` | `String` | `"bun"` | Path to Bun executable |
+
+### Connection Options
+
+The `get_connection_opts/1` function returns a keyword list compatible with Postgrex:
+
+```elixir
+[
+  host: "localhost",
+  port: 5432,
+  database: "postgres",
+  username: "postgres",
+  password: "password",
+  socket_dir: "/tmp/pglite_sockets_12345"
+]
+```
+
+## Database Operations
+
+### Basic Queries
+
+```elixir
+# Simple SELECT
+{:ok, result} = Postgrex.query(conn, "SELECT 1 as test", [])
+
+# Parameterized queries
+{:ok, result} = Postgrex.query(conn, "SELECT $1::text as name", ["Alice"])
+
+# DDL statements
+{:ok, _} = Postgrex.query(conn, "CREATE TABLE users (id SERIAL, name TEXT)", [])
+
+# DML statements
+{:ok, _} = Postgrex.query(conn, "INSERT INTO users (name) VALUES ($1)", ["Bob"])
+```
+
+### Transactions
+
+```elixir
+Postgrex.transaction(conn, fn conn ->
+  {:ok, _} = Postgrex.query(conn, "INSERT INTO users (name) VALUES ($1)", ["Alice"])
+  {:ok, _} = Postgrex.query(conn, "INSERT INTO users (name) VALUES ($1)", ["Bob"])
+  {:ok, result} = Postgrex.query(conn, "SELECT COUNT(*) FROM users", [])
+  result
+end)
+```
+
+### Connection Pooling
+
+```elixir
+# With connection pooling
+{:ok, conn} = Postgrex.start_link(opts ++ [pool_size: 10])
+
+# Or use a connection pool library like Poolboy
+```
+
+## Storage Options
+
+### In-Memory Storage
+
+```elixir
+# Default behavior - data is stored in memory
+{:ok, manager} = Pglite.start_link()
+
+# Explicit in-memory storage
+{:ok, manager} = Pglite.start_link(memory: true)
+```
+
+### File-Based Storage
+
+```elixir
+# Persistent file storage
+{:ok, manager} = Pglite.start_link(
+  memory: false,
+  data_dir: "data/myapp"
+)
+```
+
+### Memory Prefix
+
+When using in-memory storage, the data directory is automatically prefixed with `memory://`:
+
+```elixir
+# This becomes "memory://tmp/abc123"
+{:ok, manager} = Pglite.start_link(data_dir: "tmp/abc123", memory: true)
+```
+
+## Error Handling
+
+PGLite provides robust error handling:
+
+```elixir
+case Pglite.start_link() do
+  {:ok, manager} ->
+    # Success - proceed with database operations
+    opts = Pglite.get_connection_opts(manager)
+    {:ok, conn} = Postgrex.start_link(opts)
+
+  {:error, :bun_not_found} ->
+    Logger.error("Bun runtime not found. Please install Bun.")
+
+  {:error, :startup_timeout} ->
+    Logger.error("PGLite startup timed out")
+
+  {:error, reason} ->
+    Logger.error("Failed to start PGLite: #{inspect(reason)}")
+end
+```
+
+## Health Checks
+
+You can perform health checks on your PGLite instances:
+
+```elixir
+# Basic health check
+case Pglite.health_check(manager) do
+  :ok ->
+    Logger.info("PGLite is healthy")
+  {:error, reason} ->
+    Logger.error("PGLite health check failed: #{inspect(reason)}")
+end
+```
+
+## Testing
+
+PGLite is excellent for testing scenarios:
+
+```elixir
+defmodule MyAppTest do
+  use ExUnit.Case
+
+  setup do
+    {:ok, manager} = Pglite.start_link()
+    opts = Pglite.get_connection_opts(manager)
+    {:ok, conn} = Postgrex.start_link(opts)
+
+    on_exit(fn ->
+      GenServer.stop(conn)
+      GenServer.stop(manager)
+    end)
+
+    %{conn: conn, manager: manager}
+  end
+
+  test "can create and query tables", %{conn: conn} do
+    {:ok, _} = Postgrex.query(conn, "CREATE TABLE test (id INTEGER)", [])
+    {:ok, _} = Postgrex.query(conn, "INSERT INTO test VALUES (1)", [])
+    {:ok, result} = Postgrex.query(conn, "SELECT * FROM test", [])
+    assert result.rows == [[1]]
+  end
+end
+```
+
+## Performance Considerations
+
+- **Startup Time**: First startup includes WebAssembly compilation (~1-2 seconds)
+- **Memory Usage**: In-memory storage is faster but uses more RAM
+- **Concurrent Connections**: Multiple connections to the same instance share the same database
+- **Socket Performance**: Unix domain sockets provide excellent local performance
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Bun not found**: Ensure Bun is installed and in your PATH
+2. **Permission errors**: Check that the temporary directory is writable
+3. **Port conflicts**: Each instance uses unique socket paths automatically
+4. **Startup timeouts**: Increase the timeout option for slower systems
+
+### Debug Mode
+
+Enable debug logging to see detailed startup information:
+
+```elixir
+# In your config
+config :logger, level: :debug
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Ensure all tests pass
+6. Submit a pull request
 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- [PGLite](https://github.com/electric-sql/pglite) - The WebAssembly-based PostgreSQL implementation
+- [Postgrex](https://github.com/elixir-ecto/postgrex) - The PostgreSQL driver for Elixir
+- [Bun](https://bun.sh/) - The fast JavaScript runtime
+
+## Changelog
+
+### 0.1.0
+- Initial release
+- Socket-based communication architecture
+- Postgrex integration
+- Support for multiple instances
+- Memory and file-based storage options
