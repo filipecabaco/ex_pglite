@@ -10,7 +10,8 @@ defmodule Pglite do
     :script_path,
     :socket_dir,
     :startup_timeout,
-    :memory?
+    :memory?,
+    :initial_memory
   ]
 
   @type t :: %__MODULE__{
@@ -25,7 +26,8 @@ defmodule Pglite do
           script_path: String.t(),
           socket_dir: String.t(),
           startup_timeout: non_neg_integer(),
-          memory?: boolean()
+          memory?: boolean(),
+          initial_memory: non_neg_integer() | nil
         }
 
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
@@ -74,6 +76,7 @@ defmodule Pglite do
     password = Keyword.get(opts, :password, "password")
     username = Keyword.get(opts, :username, "postgres")
     startup_timeout = Keyword.get(opts, :startup_timeout, 3_000)
+    initial_memory = Keyword.get(opts, :initial_memory)
     connection_opts = [database: database, password: password, username: username]
 
     state = %__MODULE__{
@@ -82,7 +85,8 @@ defmodule Pglite do
       connection_opts: connection_opts,
       socket_dir: socket_dir,
       script_path: script_path,
-      startup_timeout: startup_timeout
+      startup_timeout: startup_timeout,
+      initial_memory: initial_memory
     }
 
     case start_pglite_socket_server(state) do
@@ -143,13 +147,20 @@ defmodule Pglite do
       bun_executable: bun_executable,
       connection_opts: connection_opts,
       socket_dir: socket_dir,
-      script_path: script_path
+      script_path: script_path,
+      initial_memory: initial_memory
     } = state
 
     data_dir_path = if String.starts_with?(data_dir, "memory://"), do: nil, else: data_dir
     File.mkdir_p!(socket_dir)
     if data_dir_path, do: File.mkdir_p!(data_dir_path)
-    opts_json = connection_opts |> Map.new() |> Jason.encode!()
+
+    all_opts =
+      if initial_memory,
+        do: connection_opts ++ [initial_memory: initial_memory],
+        else: connection_opts
+
+    opts_json = all_opts |> Map.new() |> Jason.encode!()
     Logger.info("Starting PGLite socket server with opts: #{inspect(opts_json)}")
 
     bun_command =

@@ -14,19 +14,22 @@ class PGLiteSocketServerRunner {
   private database: string | null;
   private username: string | null;
   private password: string | null;
+  private initialMemory: number | null;
 
   constructor(
     socketDir: string,
     dataDir: string,
     database: string | null = null,
     username: string | null = null,
-    password: string | null = null
+    password: string | null = null,
+    initialMemory: number | null = null
   ) {
     this.socketDir = socketDir;
     this.dataDir = dataDir;
     this.database = database;
     this.username = username;
     this.password = password;
+    this.initialMemory = initialMemory;
   }
 
   async start(): Promise<void> {
@@ -41,6 +44,7 @@ class PGLiteSocketServerRunner {
           username: this.username,
           password: this.password,
           database: this.database,
+          ...(this.initialMemory && { initialMemory: this.initialMemory }),
         },
       });
 
@@ -124,7 +128,8 @@ if (import.meta.main) {
     dataDir,
     opts.database,
     opts.username,
-    opts.password
+    opts.password,
+    opts.initialMemory
   );
   runner.start();
 }

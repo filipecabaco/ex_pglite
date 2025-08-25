@@ -80,6 +80,7 @@ GenServer.stop(manager)
   username: "user",
   password: "password",
   data_dir: "tmp/myapp_data",
+  initial_memory: 64 * 1024 * 1024,  # 64 MB initial memory
   timeout: 10_000
 )
 ```
@@ -127,6 +128,7 @@ PGLite uses a client-server architecture where:
 | `password` | `String` | `"password"` | Password for authentication |
 | `data_dir` | `String` | `"tmp/<random>"` | Directory for database files |
 | `memory` | `boolean` | `true` | Use in-memory storage when true |
+| `initial_memory` | `integer` | `nil` | Initial memory size in bytes for database |
 | `timeout` | `integer` | `5000` | Startup timeout in milliseconds |
 | `bun_executable` | `String` | `"bun"` | Path to Bun executable |
 

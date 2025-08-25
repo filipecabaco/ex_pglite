@@ -52,4 +52,18 @@ defmodule PgliteTest do
     assert result[:username]
     assert result[:password]
   end
+
+  test "supports initial_memory option" do
+    # 32 MB
+    initial_memory = 32 * 1024 * 1024
+    assert {:ok, manager} = Pglite.start_link(initial_memory: initial_memory)
+    on_exit(fn -> stop_pglite(manager) end)
+    assert Process.alive?(manager)
+
+    # Verify the option was set in the state
+    assert %{initial_memory: ^initial_memory} = :sys.get_state(manager)
+
+    assert :ok = GenServer.stop(manager)
+    refute Process.alive?(manager)
+  end
 end
