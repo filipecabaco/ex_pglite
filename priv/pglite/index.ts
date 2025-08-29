@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
 
 import { PGlite } from "@electric-sql/pglite";
-import {
-  PGLiteSocketServer,
-  PGLiteSocketServerOptions,
-} from "@electric-sql/pglite-socket";
+import type { PGLiteSocketServerOptions } from "@electric-sql/pglite-socket";
+import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
+import * as fs from "fs";
+import * as path from "path";
 
 class PGLiteSocketServerRunner {
   private socketDir: string;
@@ -38,6 +38,12 @@ class PGLiteSocketServerRunner {
         `Initializing PGlite database with dataDir: ${this.dataDir}`
       );
 
+      // Ensure socket directory exists
+      if (!fs.existsSync(this.socketDir)) {
+        fs.mkdirSync(this.socketDir, { recursive: true });
+        console.info(`Created socket directory: ${this.socketDir}`);
+      }
+
       this.db = await PGlite.create({
         dataDir: this.dataDir,
         options: {
@@ -54,7 +60,7 @@ class PGLiteSocketServerRunner {
 
       const serverOptions: PGLiteSocketServerOptions = {
         db: this.db,
-        path: this.socketDir + "/.s.PGSQL.5432",
+        path: path.join(this.socketDir, ".s.PGSQL.5432"),
       };
 
       console.info(`Starting PGlite socket server on ${serverOptions.path}`);
@@ -67,7 +73,10 @@ class PGLiteSocketServerRunner {
 
       console.info(JSON.stringify(readyMessage));
     } catch (error) {
-      console.error("Failed to start PGlite socket server:", error.message);
+      console.error(
+        "Failed to start PGlite socket server:",
+        (error as Error).message
+      );
       process.exit(1);
     }
 
@@ -87,7 +96,7 @@ class PGLiteSocketServerRunner {
 
         console.info("Shutdown complete");
       } catch (error) {
-        console.error("Error during shutdown:", error.message);
+        console.error("Error during shutdown:", (error as Error).message);
       } finally {
         process.exit(0);
       }

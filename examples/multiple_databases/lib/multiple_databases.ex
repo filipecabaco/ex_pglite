@@ -4,15 +4,15 @@ defmodule MultipleDatabases do
 
   This example demonstrates running multiple PGLite instances simultaneously
   for different business domains (e-commerce, inventory, and analytics).
-  
+
   Run with: mix run --no-halt -e "MultipleDatabases.run()"
   """
 
   def run do
     # Start three separate PGLite instances for different domains
-    {:ok, ecommerce_manager} = Pglite.start_link(data_dir: "tmp/ecommerce_db", memory: false)
-    {:ok, inventory_manager} = Pglite.start_link(data_dir: "tmp/inventory_db", memory: false)
-    {:ok, analytics_manager} = Pglite.start_link(data_dir: "tmp/analytics_db", memory: false)
+    {:ok, ecommerce_manager} = Pglite.start_link(data_dir: "tmp/ecommerce_db")
+    {:ok, inventory_manager} = Pglite.start_link(data_dir: "tmp/inventory_db")
+    {:ok, analytics_manager} = Pglite.start_link(data_dir: "tmp/analytics_db")
 
     IO.puts("🚀 Started three PGLite database instances:")
     IO.puts("  📦 E-commerce database")
@@ -194,7 +194,7 @@ defmodule MultipleDatabases do
           {:ok, _} = Postgrex.query(analytics_conn, """
             INSERT INTO sales_analytics (date, product_sku, total_sales, units_sold, customer_count)
             VALUES ($1, $2, $3, $4, 1)
-          """, [Date.new!(order_date.year, order_date.month, order_date.day), 
+          """, [Date.new!(order_date.year, order_date.month, order_date.day),
                 product_sku, Decimal.mult(unit_price, quantity), quantity])
 
         nil ->
@@ -215,7 +215,7 @@ defmodule MultipleDatabases do
       FROM orders
       WHERE status = 'completed'
     """, [])
-    
+
     [total_revenue] = List.first(revenue_result.rows)
     IO.puts("  💰 Total Revenue: $#{total_revenue}")
 

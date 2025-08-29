@@ -1,21 +1,16 @@
 # MultipleDatabases
 
-**TODO: Add description**
+Example of using multiple databases in the same process so we can join information from multiple in memory databases.
 
-## Installation
+## Setup
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `multiple_databases` to your list of dependencies in `mix.exs`:
+```bash
+mix deps.get
 
-```elixir
-def deps do
-  [
-    {:multiple_databases, "~> 0.1.0"}
-  ]
-end
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/multiple_databases>.
+## Usage
 
+```bash
+mix run -e "MultipleDatabases.run()"
+```
