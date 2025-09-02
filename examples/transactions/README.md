@@ -1,21 +1,24 @@
-# Transactions
+# Transactions Example
 
-**TODO: Add description**
+Example demonstrating transaction support in PGLite with Postgrex.
 
-## Installation
+## Setup
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `transactions` to your list of dependencies in `mix.exs`:
-
-```elixir
-def deps do
-  [
-    {:transactions, "~> 0.1.0"}
-  ]
-end
+```bash
+mix deps.get
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/transactions>.
+## Running
+
+```bash
+mix run -e "Transactions.run()"
+```
+
+## What it demonstrates
+
+- Starting a PGLite instance
+- Creating tables within transactions
+- Rolling back failed transactions
+- Committing successful transactions
+- Querying data after transaction completion
 

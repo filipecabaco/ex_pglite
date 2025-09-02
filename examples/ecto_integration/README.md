@@ -1,11 +1,24 @@
-# EctoIntegration
+# Ecto Integration Example
 
-> !note Due to the way PGLite works, we need to enforce a pool_size of 1 and no migration_lock can be enforced so that migrations can work.
+Example showing how to use PGLite with Ecto ORM.
 
-This is a simple example of how to use PGLite with Ecto.
+Note: PGLite requires pool_size of 1 and migration_lock set to false.
 
-## Running the example
+## Setup
+
+```bash
+mix deps.get
+```
+
+## Running
 
 ```bash
 mix run --no-halt -e "EctoIntegration.run()"
 ```
+
+## What it demonstrates
+
+- Configuring Ecto with PGLite
+- Running migrations
+- Creating and querying data with Ecto schemas
+- Using Ecto changesets and validations

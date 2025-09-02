@@ -1,6 +1,6 @@
 # Simple Queries Example
 
-Simple query example using PGLite.
+Basic example demonstrating SQL queries with PGLite and Postgrex.
 
 ## Setup
 
@@ -13,3 +13,11 @@ mix deps.get
 ```bash
 mix run -e "SimpleQueries.run()"
 ```
+
+## What it demonstrates
+
+- Starting a PGLite instance
+- Connecting with Postgrex
+- Creating tables
+- Inserting and querying data
+- Using parameterized queries

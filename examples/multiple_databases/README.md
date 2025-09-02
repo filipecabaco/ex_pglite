@@ -1,16 +1,22 @@
-# MultipleDatabases
+# Multiple Databases Example
 
-Example of using multiple databases in the same process so we can join information from multiple in memory databases.
+Example demonstrating how to run multiple PGLite instances simultaneously and join data across them.
 
 ## Setup
 
 ```bash
 mix deps.get
-
 ```
 
-## Usage
+## Running
 
 ```bash
 mix run -e "MultipleDatabases.run()"
 ```
+
+## What it demonstrates
+
+- Creating multiple PGLite instances
+- Managing separate in-memory databases
+- Cross-database data operations
+- Resource management for multiple instances

@@ -9,17 +9,17 @@ defmodule Pglite.BuildAssets do
   This is the main function to be called from mix aliases.
   """
   def build_and_move do
-    IO.puts("🚀 Building PGLite assets...")
+    IO.puts("Building PGLite assets...")
 
     with :ok <- check_bun_available(),
          :ok <- build_bundle(),
          :ok <- move_assets(),
          :ok <- cleanup_old_bundles() do
-      IO.puts("✅ PGLite assets built and moved successfully!")
+      IO.puts("PGLite assets built and moved successfully")
       :ok
     else
       {:error, reason} ->
-        IO.puts("❌ Failed to build assets: #{reason}")
+        IO.puts("Failed to build assets: #{reason}")
         {:error, reason}
     end
   end
@@ -35,7 +35,7 @@ defmodule Pglite.BuildAssets do
   Clean build - removes existing assets and rebuilds everything.
   """
   def clean_build do
-    IO.puts("🧹 Cleaning existing assets...")
+    IO.puts("Cleaning existing assets")
 
     with :ok <- clean_existing_assets(),
          :ok <- build_and_move() do
@@ -65,10 +65,10 @@ defmodule Pglite.BuildAssets do
     # Create output directory
     File.mkdir_p!("priv/pglite")
 
-    IO.puts("📦 Creating optimized bundle directly in priv/pglite/")
+    IO.puts("Creating optimized bundle directly in priv/pglite/")
     case System.cmd(get_bun_path(), ["install"], cd: "priv/pglite") do
       {_output, 0} ->
-        IO.puts("✅ Bun installed successfully")
+        IO.puts("Bun installed successfully")
         :ok
       {error, _code} ->
         {:error, "Bun install failed: #{error}"}
@@ -88,7 +88,7 @@ defmodule Pglite.BuildAssets do
            "bun:*"
          ]) do
       {_output, 0} ->
-        IO.puts("✅ Bundle built successfully")
+        IO.puts("Bundle built successfully")
         :ok
       {error, _code} ->
         {:error, "Bundle build failed: #{error}"}
@@ -96,22 +96,22 @@ defmodule Pglite.BuildAssets do
   end
 
   defp move_assets do
-    IO.puts("📁 Copying WebAssembly files to priv/pglite/")
+    IO.puts("Copying WebAssembly files to priv/pglite/")
 
     # Copy WebAssembly files if they exist
     copy_if_exists("pglite.wasm", "priv/pglite/pglite.wasm")
     copy_if_exists("pglite.data", "priv/pglite/pglite.data")
 
-    IO.puts("📋 Assets ready")
+    IO.puts("Assets ready")
     :ok
   end
 
   defp copy_if_exists(source, destination) do
     if File.exists?(source) do
       File.cp!(source, destination)
-      IO.puts("  📋 Copied #{source}")
+      IO.puts("Copied #{source}")
     else
-      IO.puts("  ⚠️  Warning: #{source} not found, skipping")
+      IO.puts("Warning: #{source} not found, skipping")
     end
   end
 
@@ -125,13 +125,13 @@ defmodule Pglite.BuildAssets do
   end
 
   defp clean_existing_assets do
-    IO.puts("  🗑️  Removing priv/pglite/ directory...")
+    IO.puts("Removing priv/pglite/ directory...")
     File.rm_rf!("priv/pglite")
 
-    IO.puts("  🗑️  Removing tmp/ directory...")
+    IO.puts("Removing tmp/ directory...")
     File.rm_rf!("tmp")
 
-    IO.puts("  🧹 Cleanup completed")
+    IO.puts("Cleanup completed")
     :ok
   end
 end

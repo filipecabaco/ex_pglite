@@ -2,24 +2,30 @@
 
 Real-time database replication from PostgreSQL to local PGLite cache.
 
-> Note: the databse in docker has a startup script to add some data for the purpose of the example.
+Note: The database in Docker has a startup script to add sample data for the example.
 
-## 🚀 Quick Start
+## Quick Start
 
-**Two steps to get started:**
+Start the PostgreSQL database and Elixir session:
 
 ```bash
-# Start PostgreSQL with default settings
+# Start PostgreSQL
 docker-compose up -d
 
 # Start interactive Elixir session
 iex -S mix
 ```
 
-Then copy-paste this code in the IEx session:
+In the IEx session:
 
 ```elixir
-source_conn_opts = [host: "localhost", port: 5432, database: "postgres", username: "postgres", password: "postgres"]
+source_conn_opts = [
+  host: "localhost", 
+  port: 5432, 
+  database: "postgres", 
+  username: "postgres", 
+  password: "postgres"
+]
 config = %{source: source_conn_opts}
 {:ok, client} = ReadReplica.start_link(config)
 
@@ -27,20 +33,23 @@ pid = ReadReplica.get_cache_connection(client)
 Postgrex.query!(pid, "SELECT * from public.comments", [])
 ```
 
-You can connect to docker using `psql postgres://postgres:postgres@localhost:5432/postgres` and then run queries on the database:
-```sql
- INSERT INTO public.comments (id, post_id, user_id, content, created_at) VALUES
-   (1, 1, 3, 'a', '2025-08-31 21:30:59.410121'),
-   (2, 1, 3, 'b', '2025-08-31 21:30:59.410121'),
-   (3, 1, 3, 'c', '2025-08-31 21:30:59.410121'),
-   (4, 1, 3, 'd', '2025-08-31 21:30:59.410121');
- UPDATE public.comments SET content = 'b' WHERE post_id = 1;
- DELETE FROM public.comments WHERE post_id = 1;
- TRUNCATE TABLE public.comments;
+Test replication by connecting to PostgreSQL:
+
+```bash
+psql postgres://postgres:postgres@localhost:5432/postgres
 ```
 
-That's it! This will:
-1. ✅ Start PostgreSQL database with default postgres/postgres credentials
-2. ✅ Create local PGLite cache with real-time replication
-3. ✅ Sync and dump all the tables from the public schema into the in-memory PGLite cache
-4. ✅ Will be kept up to date using Replication.Handler
+Run sample operations:
+
+```sql
+INSERT INTO public.comments (id, post_id, user_id, content, created_at) VALUES
+  (1, 1, 3, 'Sample comment', '2025-08-31 21:30:59.410121');
+UPDATE public.comments SET content = 'Updated comment' WHERE id = 1;
+DELETE FROM public.comments WHERE id = 1;
+```
+
+This example demonstrates:
+1. Starting PostgreSQL with default credentials
+2. Creating a local PGLite cache with real-time replication  
+3. Syncing tables from the public schema to in-memory PGLite
+4. Maintaining real-time updates via replication handlers
