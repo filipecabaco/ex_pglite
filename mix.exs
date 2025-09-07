@@ -36,15 +36,14 @@ defmodule Pglite.MixProject do
         "README.md",
         "LICENSE",
         "SHIPPING.md",
-        # Include any versioned optimized files
         "index.js",
         "pglite.wasm",
         "pglite.data"
       ],
-      maintainers: ["Your Name"],
+      maintainers: ["filipecabaco"],
       licenses: ["MIT"],
       links: %{
-        "GitHub" => "https://github.com/your-org/pglite",
+        "GitHub" => "https://github.com/filipecabaco/pglite",
         "Docs" => "https://hexdocs.pm/pglite"
       }
     ]
@@ -61,7 +60,12 @@ defmodule Pglite.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
-      {:postgrex, "~> 0.21"}
+      {:postgrex, "~> 0.21"},
+      {:ex_doc, "~> 0.30", only: :dev, runtime: false},
+      {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 end

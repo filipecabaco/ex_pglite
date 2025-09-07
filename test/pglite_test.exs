@@ -29,11 +29,9 @@ defmodule PgliteTest do
   end
 
   defp stop_pglite(manager) do
-    try do
-      GenServer.stop(manager)
-    catch
-      :exit, _reason -> :ok
-    end
+    GenServer.stop(manager)
+  catch
+    :exit, _reason -> :ok
   end
 
   test "handles startup timeout" do

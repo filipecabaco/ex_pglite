@@ -1,4 +1,18 @@
 defmodule Pglite do
+  @moduledoc """
+  An Elixir wrapper for PGLite - in-memory PostgreSQL database.
+
+  PGLite spawns PostgreSQL databases using Bun runtime and provides PostgreSQL-compatible 
+  connections through Unix domain sockets. Supports both in-memory and persistent databases.
+
+  ## Basic Usage
+
+      {:ok, pglite} = Pglite.start_link()
+      conn_opts = Pglite.get_connection_opts(pglite)
+      {:ok, conn} = Postgrex.start_link(conn_opts)
+      {:ok, result} = Postgrex.query(conn, "SELECT 1", [])
+  """
+
   use GenServer
   require Logger
 
@@ -30,6 +44,44 @@ defmodule Pglite do
           initial_memory: non_neg_integer() | nil
         }
 
+  @doc """
+  Starts a PGLite GenServer process.
+
+  ## Options
+
+  - `:name` - Process name for registration
+  - `:data_dir` - Directory for persistent database files (default: random temp directory)
+  - `:memory` - Use in-memory database (default: `true`)
+  - `:database` - Database name (default: `"postgres"`)
+  - `:username` - Database username (default: `"postgres"`)  
+  - `:password` - Database password (default: `"password"`)
+  - `:startup_timeout` - Startup timeout in milliseconds (default: `3000`)
+  - `:initial_memory` - Initial memory allocation in bytes
+  - `:bun_executable` - Path to bun executable (default: searches PATH)
+  - `:script_path` - Path to PGLite script (default: uses bundled script)
+
+  ## Examples
+
+      # Start in-memory database
+      {:ok, pid} = Pglite.start_link()
+
+      # Start persistent database
+      {:ok, pid} = Pglite.start_link(
+        data_dir: "/path/to/db", 
+        memory: false
+      )
+
+      # Start with custom configuration
+      {:ok, pid} = Pglite.start_link(
+        database: "myapp_db",
+        username: "myuser", 
+        password: "mypass",
+        initial_memory: 64 * 1024 * 1024  # 64MB
+      )
+
+      # Start with named process
+      {:ok, pid} = Pglite.start_link(name: :my_pglite)
+  """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts \\ []) do
     {gen_opts, init_opts} = Keyword.split(opts, [:name])
@@ -37,12 +89,40 @@ defmodule Pglite do
     GenServer.start_link(__MODULE__, init_opts, gen_opts)
   end
 
+  @doc """
+  Performs a health check by executing a simple `SELECT 1` query.
+
+  ## Examples
+
+      {:ok, pid} = Pglite.start_link()
+      :ok = Pglite.health_check(pid)
+  """
   @spec health_check(pid()) :: :ok | {:error, term()}
   def health_check(manager_pid), do: run_health_check(manager_pid)
 
+  @doc """
+  Returns socket directory information for debugging purposes.
+
+  ## Examples
+
+      {:ok, pid} = Pglite.start_link()
+      socket_info = Pglite.get_socket_info(pid)
+  """
   @spec get_socket_info(pid()) :: {:ok, String.t()} | {:error, term()}
   def get_socket_info(manager_pid), do: GenServer.call(manager_pid, :get_socket_info)
 
+  @doc """
+  Returns connection options for use with Postgrex.
+
+  The returned options can be passed directly to `Postgrex.start_link/1` to establish
+  a connection to the PGLite database.
+
+  ## Examples
+
+      {:ok, pid} = Pglite.start_link()
+      conn_opts = Pglite.get_connection_opts(pid)
+      {:ok, conn} = Postgrex.start_link(conn_opts)
+  """
   @spec get_connection_opts(pid()) :: [
           database: String.t(),
           password: String.t(),
