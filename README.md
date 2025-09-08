@@ -25,7 +25,7 @@ Add `pglite` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:pglite, "~> 0.1.0"}
+    {:ex_pglite, "~> 0.1.0"}
   ]
 end
 ```
@@ -179,4 +179,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [PGLite](https://github.com/electric-sql/pglite) - The WebAssembly-based PostgreSQL implementation
 - [Postgrex](https://github.com/elixir-ecto/postgrex) - The PostgreSQL driver for Elixir
 - [Bun](https://bun.sh/) - The fast JavaScript runtime
-

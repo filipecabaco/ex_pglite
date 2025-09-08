@@ -3,7 +3,7 @@ defmodule Pglite.MixProject do
 
   def project do
     [
-      app: :pglite,
+      app: :ex_pglite,
       version: "0.1.0",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
@@ -28,17 +28,15 @@ defmodule Pglite.MixProject do
 
   defp package do
     [
-      name: "pglite",
+      name: "ex_pglite",
       files: [
         "lib",
-        "priv",
+        "priv/pglite/index.js",
+        "priv/pglite/pglite.wasm",
+        "priv/pglite/pglite.data",
         "mix.exs",
         "README.md",
-        "LICENSE",
-        "SHIPPING.md",
-        "index.js",
-        "pglite.wasm",
-        "pglite.data"
+        "LICENSE"
       ],
       maintainers: ["filipecabaco"],
       licenses: ["MIT"],

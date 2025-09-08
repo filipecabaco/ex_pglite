@@ -25,7 +25,7 @@ defmodule Replication.MixProject do
       {:postgrex, "~> 0.19"},
       {:jason, "~> 1.4"},
       {:postgres_replication, git: "https://github.com/filipecabaco/postgres_replication.git"},
-      {:pglite, path: "../../"}
+      {:ex_pglite, path: "../../"}
     ]
   end
 end

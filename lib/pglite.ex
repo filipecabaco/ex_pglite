@@ -2,7 +2,7 @@ defmodule Pglite do
   @moduledoc """
   An Elixir wrapper for PGLite - in-memory PostgreSQL database.
 
-  PGLite spawns PostgreSQL databases using Bun runtime and provides PostgreSQL-compatible 
+  PGLite spawns PostgreSQL databases using Bun runtime and provides PostgreSQL-compatible
   connections through Unix domain sockets. Supports both in-memory and persistent databases.
 
   ## Basic Usage
@@ -53,7 +53,7 @@ defmodule Pglite do
   - `:data_dir` - Directory for persistent database files (default: random temp directory)
   - `:memory` - Use in-memory database (default: `true`)
   - `:database` - Database name (default: `"postgres"`)
-  - `:username` - Database username (default: `"postgres"`)  
+  - `:username` - Database username (default: `"postgres"`)
   - `:password` - Database password (default: `"password"`)
   - `:startup_timeout` - Startup timeout in milliseconds (default: `3000`)
   - `:initial_memory` - Initial memory allocation in bytes
@@ -67,14 +67,14 @@ defmodule Pglite do
 
       # Start persistent database
       {:ok, pid} = Pglite.start_link(
-        data_dir: "/path/to/db", 
+        data_dir: "/path/to/db",
         memory: false
       )
 
       # Start with custom configuration
       {:ok, pid} = Pglite.start_link(
         database: "myapp_db",
-        username: "myuser", 
+        username: "myuser",
         password: "mypass",
         initial_memory: 64 * 1024 * 1024  # 64MB
       )
@@ -195,7 +195,7 @@ defmodule Pglite do
 
   def handle_info({port, {:exit_status, status}}, %{bun_port: port} = state) do
     Logger.error("PGLite socket server process exited with status: #{status}")
-    {:stop, {:pglite_exit, status}, state}
+    {:stop, {:ex_pglite_exit, status}, state}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -266,7 +266,7 @@ defmodule Pglite do
 
       {^port, {:exit_status, status}} ->
         Logger.error("PGLite socket server process exited with status #{status} during startup")
-        {:error, {:pglite_startup_failed, status}}
+        {:error, {:ex_pglite_startup_failed, status}}
     after
       startup_timeout ->
         Logger.error("Timeout waiting for PGLite socket server to be ready")
@@ -275,7 +275,7 @@ defmodule Pglite do
   end
 
   defp get_script_path do
-    script_path = Application.app_dir(:pglite, "priv/pglite/index.js")
+    script_path = Application.app_dir(:ex_pglite, "priv/pglite/index.js")
     if File.exists?(script_path), do: script_path, else: "priv/bun/index.ts"
   end
 

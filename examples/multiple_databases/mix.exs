@@ -21,7 +21,7 @@ defmodule MultipleDatabases.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:pglite, path: "../../"},
+      {:ex_pglite, path: "../../"},
       {:postgrex, "~> 0.21"},
       {:decimal, "~> 2.0"}
     ]

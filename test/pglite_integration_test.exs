@@ -75,7 +75,7 @@ defmodule PgliteIntegrationTest do
 
     # Try to query a non-existent table
     assert {:error, _reason} = Postgrex.query(conn, "SELECT * FROM non_existent_table", [])
-    refute_receive {:EXIT, _manager, {:pglite_exit, _status}}
+    refute_receive {:EXIT, _manager, {:ex_pglite_exit, _status}}
   end
 
   test "handles invalid SQL gracefully", %{temp_dir: temp_dir} do
@@ -83,7 +83,7 @@ defmodule PgliteIntegrationTest do
     {:ok, conn} = start_postgrex(data_dir: temp_dir)
 
     assert {:error, _reason} = Postgrex.query(conn, "INVALID SQL SYNTAX", [])
-    refute_receive {:EXIT, _manager, {:pglite_exit, _status}}
+    refute_receive {:EXIT, _manager, {:ex_pglite_exit, _status}}
   end
 
   test "handles connection failures", %{temp_dir: temp_dir} do
@@ -92,7 +92,7 @@ defmodule PgliteIntegrationTest do
     {:ok, conn} = start_postgrex(data_dir: temp_dir)
 
     assert {:ok, _result} = Postgrex.query(conn, "SELECT 1", [])
-    refute_receive {:EXIT, ^conn, {:pglite_exit, _status}}
+    refute_receive {:EXIT, ^conn, {:ex_pglite_exit, _status}}
 
     GenServer.stop(conn)
     Process.sleep(50)

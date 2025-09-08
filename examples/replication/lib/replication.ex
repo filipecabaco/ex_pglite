@@ -9,7 +9,7 @@ defmodule ReadReplica do
   use GenServer
   require Logger
 
-  defstruct [:pglite_manager, :cache_connection, :replication_pid, :handler_pid, :tables_to_sync]
+  defstruct [:ex_pglite_manager, :cache_connection, :replication_pid, :handler_pid, :tables_to_sync]
 
   @spec start_link(map()) :: GenServer.on_start()
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)

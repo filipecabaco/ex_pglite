@@ -22,7 +22,7 @@ defmodule EctoIntegration.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:pglite, path: "../../"},
+      {:ex_pglite, path: "../../"},
       {:ecto_sql, "~> 3.10"},
       {:postgrex, "~> 0.21"}
     ]
