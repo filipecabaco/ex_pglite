@@ -1,22 +1,25 @@
-# Multiple Databases Example
+# Multiple Databases
 
-Example demonstrating how to run multiple PGLite instances simultaneously and join data across them.
+Running multiple PGlite instances on different TCP ports.
 
-## Setup
+## When to Use
 
-```bash
-mix deps.get
+Use this when you need completely separate PGlite instances. Each instance runs its own PostgreSQL process.
+
+For multiple databases within a single instance, see `single_instance_multiple_dbs`.
+
+## How It Works
+
+Each instance needs a unique `tcp_port`:
+
+```elixir
+{:ok, db1} = Pglite.start_link(tcp_port: 54321)
+{:ok, db2} = Pglite.start_link(tcp_port: 54322)
 ```
 
 ## Running
 
 ```bash
+mix deps.get
 mix run -e "MultipleDatabases.run()"
 ```
-
-## What it demonstrates
-
-- Creating multiple PGLite instances
-- Managing separate in-memory databases
-- Cross-database data operations
-- Resource management for multiple instances

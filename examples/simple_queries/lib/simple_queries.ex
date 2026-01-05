@@ -1,86 +1,86 @@
 defmodule SimpleQueries do
   @moduledoc """
-  Simple Queries Example
+  Basic database operations with PGlite.
 
-  This example demonstrates basic database operations with PGLite.
-  Run with: mix run --no-halt -e "SimpleQueries.run()"
+  Run with: mix run -e "SimpleQueries.run()"
   """
 
   def run do
-    # Start a PGLite instance
-    {:ok, manager} = Pglite.start_link()
+    {:ok, pglite} = Pglite.start_link()
+    {:ok, conn} = Postgrex.start_link(Pglite.get_connection_opts(pglite))
 
-    # Get connection options and start Postgrex connection
-    conn_opts = Pglite.get_connection_opts(manager)
-    {:ok, conn} = Postgrex.start_link(conn_opts)
+    IO.puts("Started PGlite instance")
 
-    IO.puts("🚀 Started PGLite database instance")
-
-    # Create a table
-    {:ok, _} = Postgrex.query(conn, """
-      CREATE TABLE users (
-        id SERIAL PRIMARY KEY,
-        username VARCHAR(50) UNIQUE NOT NULL,
-        email VARCHAR(100) UNIQUE NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    {:ok, _} =
+      Postgrex.query(
+        conn,
+        """
+        CREATE TABLE users (
+          id SERIAL PRIMARY KEY,
+          username VARCHAR(50) UNIQUE NOT NULL,
+          email VARCHAR(100) UNIQUE NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        []
       )
-    """, [])
 
-    IO.puts("✅ Created users table")
+    IO.puts("Created users table")
 
-    # Insert some sample data
-    {:ok, _} = Postgrex.query(conn, """
-      INSERT INTO users (username, email) VALUES
-        ('alice', 'alice@example.com'),
-        ('bob', 'bob@example.com'),
-        ('charlie', 'charlie@example.com')
-    """, [])
+    {:ok, _} =
+      Postgrex.query(
+        conn,
+        """
+        INSERT INTO users (username, email) VALUES
+          ('alice', 'alice@example.com'),
+          ('bob', 'bob@example.com'),
+          ('charlie', 'charlie@example.com')
+        """,
+        []
+      )
 
-    IO.puts("✅ Inserted sample users")
+    IO.puts("Inserted sample users")
 
-    # Query all users
     {:ok, result} = Postgrex.query(conn, "SELECT * FROM users ORDER BY id", [])
-    IO.puts("\n📋 All users:")
+    IO.puts("\nAll users:")
+
     Enum.each(result.rows, fn [id, username, email, created_at] ->
       IO.puts("  #{id}: #{username} (#{email}) - #{created_at}")
     end)
 
-    # Query with parameters
     {:ok, result} = Postgrex.query(conn, "SELECT * FROM users WHERE username = $1", ["alice"])
-    IO.puts("\n🔍 User with username 'alice':")
+    IO.puts("\nUser 'alice':")
+
     case result.rows do
       [[id, username, email, created_at]] ->
         IO.puts("  #{id}: #{username} (#{email}) - #{created_at}")
+
       [] ->
-        IO.puts("  No user found")
+        IO.puts("  Not found")
     end
 
-    # Count users
-    {:ok, result} = Postgrex.query(conn, "SELECT COUNT(*) as user_count FROM users", [])
-    [user_count] = List.first(result.rows)
-    IO.puts("\n📊 Total users: #{user_count}")
+    {:ok, result} = Postgrex.query(conn, "SELECT COUNT(*) FROM users", [])
+    [count] = List.first(result.rows)
+    IO.puts("\nTotal users: #{count}")
 
-    # Update a user
-    {:ok, _} = Postgrex.query(conn, "UPDATE users SET email = $1 WHERE username = $2", ["alice.updated@example.com", "alice"])
-    IO.puts("✅ Updated Alice's email")
+    {:ok, _} =
+      Postgrex.query(conn, "UPDATE users SET email = $1 WHERE username = $2", [
+        "alice.new@example.com",
+        "alice"
+      ])
 
-    # Verify the update
     {:ok, result} = Postgrex.query(conn, "SELECT email FROM users WHERE username = $1", ["alice"])
     [email] = List.first(result.rows)
-    IO.puts("✅ Alice's new email: #{email}")
+    IO.puts("Updated alice's email to: #{email}")
 
-    # Delete a user
     {:ok, _} = Postgrex.query(conn, "DELETE FROM users WHERE username = $1", ["charlie"])
-    IO.puts("✅ Deleted user 'charlie'")
 
-    # Final count
-    {:ok, result} = Postgrex.query(conn, "SELECT COUNT(*) as user_count FROM users", [])
-    [user_count] = List.first(result.rows)
-    IO.puts("📊 Final user count: #{user_count}")
+    {:ok, result} = Postgrex.query(conn, "SELECT COUNT(*) FROM users", [])
+    [count] = List.first(result.rows)
+    IO.puts("Final user count: #{count}")
 
-    # Clean up
     GenServer.stop(conn)
-    GenServer.stop(manager)
-    IO.puts("\n🧹 Cleaned up PGLite instance")
+    GenServer.stop(pglite)
+    IO.puts("\nCleaned up")
   end
 end

@@ -1,27 +1,71 @@
-# The directory Mix will write compiled artifacts to.
+# Elixir
 /_build/
-
-# If you run "mix test --cover", coverage assets end up here.
 /cover/
-
-# The directory Mix downloads your dependencies sources to.
 /deps/
-
-# Where third-party dependencies like ExDoc output generated docs.
 /doc/
-
-# If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
-
-# Also ignore archive artifacts (built via "mix archive.build").
 *.ez
-
-# Ignore package tarball (built via "mix hex.build").
 pglite-*.tar
+tmp/
+# Rust/Cargo
+pglite_port/target/
+pglite_port/Cargo.lock
+*.rs.bk
+*.pdb
 
-# Temporary files, for example, from tests.
+# Built binaries (compiled locally by users)
+priv/bin/pglite_port
+priv/bin/pglite_port.exe
+
+# Build artifacts from development
+priv/bin/build_artifacts
+
+# Intermediate/uncompressed build artifacts (only ship compressed versions)
+priv/pgdata_seed/
+priv/pglite.initialized.wasi
+
+# Old/deprecated files (if they still exist)
+priv/pglite/*.wasm
+priv/pglite/*.data
+
+# Temporary files
 /tmp/
-/priv/bun/node_modules
-.vscode
+*.tmp
+*.log
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# OS files
 .DS_Store
-.
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.elixir_ls/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Node modules (if any examples use them)
+/priv/bun/node_modules
+node_modules/
+
+# Git submodules (old pglite submodule if still present)
+/pglite/
+
+# Test artifacts
+/test/tmp/

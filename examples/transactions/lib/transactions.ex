@@ -1,107 +1,113 @@
 defmodule Transactions do
   @moduledoc """
-  Transactions Example
+  Transaction handling with PGlite.
 
-  This example demonstrates transaction handling with PGLite.
-  Run with: mix run --no-halt -e "Transactions.run()"
+  Run with: mix run -e "Transactions.run()"
   """
 
   def run do
-    # Start a PGLite instance
-    {:ok, manager} = Pglite.start_link()
+    {:ok, pglite} = Pglite.start_link()
+    {:ok, conn} = Postgrex.start_link(Pglite.get_connection_opts(pglite))
 
-    # Get connection options and start Postgrex connection
-    conn_opts = Pglite.get_connection_opts(manager)
-    {:ok, conn} = Postgrex.start_link(conn_opts)
+    IO.puts("Started PGlite instance")
 
-    IO.puts("🚀 Started PGLite database instance")
-
-    # Create tables for a simple banking system
-    {:ok, _} = Postgrex.query(conn, """
-      CREATE TABLE accounts (
-        id SERIAL PRIMARY KEY,
-        account_number VARCHAR(20) UNIQUE NOT NULL,
-        owner_name VARCHAR(100) NOT NULL,
-        balance DECIMAL(10,2) DEFAULT 0.00,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    {:ok, _} =
+      Postgrex.query(
+        conn,
+        """
+        CREATE TABLE accounts (
+          id SERIAL PRIMARY KEY,
+          account_number VARCHAR(20) UNIQUE NOT NULL,
+          owner_name VARCHAR(100) NOT NULL,
+          balance DECIMAL(10,2) DEFAULT 0.00
+        )
+        """,
+        []
       )
-    """, [])
 
-    IO.puts("✅ Created accounts table")
+    {:ok, _} =
+      Postgrex.query(
+        conn,
+        """
+        INSERT INTO accounts (account_number, owner_name, balance) VALUES
+          ('ACC001', 'Alice', 1000.00),
+          ('ACC002', 'Bob', 500.00)
+        """,
+        []
+      )
 
-    # Insert some initial accounts
-    {:ok, _} = Postgrex.query(conn, """
-      INSERT INTO accounts (account_number, owner_name, balance) VALUES
-        ('ACC001', 'Alice Johnson', 1000.00),
-        ('ACC002', 'Bob Smith', 500.00)
-    """, [])
+    IO.puts("Created accounts table with initial data")
 
-    IO.puts("✅ Created initial accounts")
+    print_balances(conn, "Initial balances")
 
-    # Display initial balances
-    {:ok, result} = Postgrex.query(conn, "SELECT account_number, owner_name, balance FROM accounts ORDER BY id", [])
-    IO.puts("\n💰 Initial account balances:")
-    Enum.each(result.rows, fn [acc_num, owner, balance] ->
-      IO.puts("  #{acc_num} (#{owner}): $#{balance}")
-    end)
+    # Successful transaction
+    IO.puts("\nExecuting transfer transaction...")
 
-    # Example: Successful money transfer transaction
-    IO.puts("\n🔄 Executing money transfer transaction...")
+    result =
+      Postgrex.transaction(conn, fn conn ->
+        {:ok, _} =
+          Postgrex.query(
+            conn,
+            "UPDATE accounts SET balance = balance - $1 WHERE account_number = $2",
+            [Decimal.new("200.00"), "ACC001"]
+          )
 
-    result = Postgrex.transaction(conn, fn conn ->
-      # Transfer $200 from Alice to Bob
-      {:ok, _} = Postgrex.query(conn, "UPDATE accounts SET balance = balance - $1 WHERE account_number = $2", [200.00, "ACC001"])
-      {:ok, _} = Postgrex.query(conn, "UPDATE accounts SET balance = balance + $1 WHERE account_number = $2", [200.00, "ACC002"])
+        {:ok, _} =
+          Postgrex.query(
+            conn,
+            "UPDATE accounts SET balance = balance + $1 WHERE account_number = $2",
+            [Decimal.new("200.00"), "ACC002"]
+          )
 
-      # Return success message
-      "Transfer completed successfully"
-    end)
-
-    case result do
-      {:ok, message} ->
-        IO.puts("✅ #{message}")
-      {:error, reason} ->
-        IO.puts("❌ Transaction failed: #{inspect(reason)}")
-    end
-
-    # Display final balances
-    {:ok, result} = Postgrex.query(conn, "SELECT account_number, owner_name, balance FROM accounts ORDER BY id", [])
-    IO.puts("\n💰 Final account balances:")
-    Enum.each(result.rows, fn [acc_num, owner, balance] ->
-      IO.puts("  #{acc_num} (#{owner}): $#{balance}")
-    end)
-
-    # Example: Transaction rollback
-    IO.puts("\n🔄 Attempting transaction with error (will rollback)...")
-
-    result = Postgrex.transaction(conn, fn conn ->
-      # Update Alice's balance
-      {:ok, _} = Postgrex.query(conn, "UPDATE accounts SET balance = balance - $1 WHERE account_number = $2", [100.00, "ACC001"])
-      
-      # Simulate an error
-      raise "Something went wrong!"
-      
-      # This won't be reached
-      {:ok, _} = Postgrex.query(conn, "UPDATE accounts SET balance = balance + $1 WHERE account_number = $2", [100.00, "ACC002"])
-    end)
+        "Transfer completed"
+      end)
 
     case result do
-      {:ok, _} ->
-        IO.puts("❌ Transaction should have failed but didn't")
-      {:error, reason} ->
-        IO.puts("✅ Transaction correctly rolled back: #{inspect(reason)}")
+      {:ok, message} -> IO.puts(message)
+      {:error, reason} -> IO.puts("Transaction failed: #{inspect(reason)}")
     end
 
-    # Verify balances are unchanged after rollback
-    {:ok, result} = Postgrex.query(conn, "SELECT account_number, owner_name, balance FROM accounts ORDER BY id", [])
-    IO.puts("\n💰 Balances after rollback:")
-    Enum.each(result.rows, fn [acc_num, owner, balance] ->
-      IO.puts("  #{acc_num} (#{owner}): $#{balance}")
-    end)
+    print_balances(conn, "After transfer")
 
-    # Clean up
+    # Failed transaction (rollback)
+    IO.puts("\nAttempting transaction that will fail...")
+
+    result =
+      Postgrex.transaction(conn, fn conn ->
+        {:ok, _} =
+          Postgrex.query(
+            conn,
+            "UPDATE accounts SET balance = balance - $1 WHERE account_number = $2",
+            [Decimal.new("100.00"), "ACC001"]
+          )
+
+        raise "Simulated error"
+      end)
+
+    case result do
+      {:ok, _} -> IO.puts("Unexpected success")
+      {:error, _} -> IO.puts("Transaction rolled back as expected")
+    end
+
+    print_balances(conn, "After rollback (unchanged)")
+
     GenServer.stop(conn)
-    GenServer.stop(manager)
-    IO.puts("\n🧹 Cleaned up PGLite instance")
+    GenServer.stop(pglite)
+    IO.puts("\nCleaned up")
+  end
+
+  defp print_balances(conn, label) do
+    {:ok, result} =
+      Postgrex.query(
+        conn,
+        "SELECT account_number, owner_name, balance FROM accounts ORDER BY id",
+        []
+      )
+
+    IO.puts("\n#{label}:")
+
+    Enum.each(result.rows, fn [acc, owner, balance] ->
+      IO.puts("  #{acc} (#{owner}): $#{balance}")
+    end)
   end
 end

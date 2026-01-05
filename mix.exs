@@ -5,8 +5,9 @@ defmodule Pglite.MixProject do
     [
       app: :ex_pglite,
       version: "0.1.0",
-      elixir: "~> 1.18",
+      elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
+      elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       package: package(),
       description: "Elixir library for PGLite - lightweight PostgreSQL with Postgrex integration",
@@ -14,16 +15,13 @@ defmodule Pglite.MixProject do
     ]
   end
 
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
+
   defp aliases do
     [
-      "build.assets": &build_assets/1
+      test: ["pglite.build_fresh", "test"]
     ]
-  end
-
-  defp build_assets(_args) do
-    # Load and run the build module
-    Code.require_file("scripts/build_assets.ex")
-    Pglite.BuildAssets.build_and_move()
   end
 
   defp package do
@@ -31,18 +29,23 @@ defmodule Pglite.MixProject do
       name: "ex_pglite",
       files: [
         "lib",
-        "priv/pglite/index.js",
-        "priv/pglite/pglite.wasm",
-        "priv/pglite/pglite.data",
+        "priv/pgdata_seed.tar.zst",
+        "priv/pglite.cwasm",
+        "priv/pglite.wasi",
+        "priv/pglite_prefix",
+        "pglite_port/src",
+        "pglite_port/Cargo.toml",
+        "pglite_port/Makefile",
         "mix.exs",
+        "Makefile",
         "README.md",
         "LICENSE"
       ],
       maintainers: ["filipecabaco"],
       licenses: ["MIT"],
       links: %{
-        "GitHub" => "https://github.com/filipecabaco/pglite",
-        "Docs" => "https://hexdocs.pm/pglite"
+        "GitHub" => "https://github.com/filipecabaco/ex_pglite",
+        "Docs" => "https://hexdocs.pm/ex_pglite"
       }
     ]
   end
