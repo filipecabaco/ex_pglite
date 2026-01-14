@@ -21,3 +21,6 @@ transactions-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+# Generated schema file from pg_dump
+schema.sql

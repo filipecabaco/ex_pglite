@@ -1,181 +1,140 @@
-# PGLite
+# ex_pglite
 
-A lightweight Elixir library that provides PostgreSQL functionality through PGLite, a WebAssembly-based PostgreSQL implementation. This library offers a simple and efficient way to run PostgreSQL databases in your Elixir applications without requiring a full PostgreSQL server installation.
+An Elixir library that runs PostgreSQL in-process using PGlite (PostgreSQL compiled to WebAssembly). No external PostgreSQL server required.
 
 ## Features
 
-- **Lightweight**: No need for a full PostgreSQL server installation
-- **WebAssembly-based**: Runs PGLite in a Bun runtime environment
-- **Socket-based communication**: Uses Unix domain sockets for efficient local communication
-- **Postgrex integration**: Seamlessly integrates with the popular Postgrex library
-- **Multiple instances**: Support for running multiple database instances simultaneously
-- **Memory and file-based storage**: Choose between in-memory or persistent file storage
-- **Transaction support**: Full ACID transaction capabilities
-- **Cross-platform**: Works on macOS, Linux, and Windows (with WSL)
-
-## Prerequisites
-
-- Elixir 1.18 or later
-- Bun runtime (`curl -fsSL https://bun.sh/install | bash`)
-
-## Installation
-
-Add `pglite` to your list of dependencies in `mix.exs`:
-
-```elixir
-def deps do
-  [
-    {:ex_pglite, "~> 0.1.0"}
-  ]
-end
-```
-
-Then install your dependencies:
-
-```bash
-mix deps.get
-```
-
-## Quick Start
-
-### Basic Usage
-
-```elixir
-# Start a PGLite instance
-{:ok, manager} = Pglite.start_link()
-
-# Get connection options for Postgrex
-opts = Pglite.get_connection_opts(manager)
-
-# Connect with Postgrex
-{:ok, conn} = Postgrex.start_link(opts)
-
-# Execute queries
-{:ok, result} = Postgrex.query(conn, "SELECT 1 as test", [])
-IO.inspect(result.rows) # [[1]]
-
-# Clean up
-GenServer.stop(conn)
-GenServer.stop(manager)
-```
-
-### Configuration
-
-```elixir
-{:ok, manager} = Pglite.start_link(
-  database: "myapp",
-  username: "user",
-  password: "password",
-  data_dir: "tmp/myapp_data",
-  memory: false,  # Use persistent storage
-  startup_timeout: 5_000
-)
-```
+- **Zero external dependencies** - PostgreSQL runs entirely in-process via WebAssembly
+- **Standard PostgreSQL wire protocol** - Works with Postgrex and any PostgreSQL client
+- **Memory and persistent modes** - Choose between ephemeral or persistent storage
+- **Multiple instances** - Run isolated PostgreSQL instances on different ports
+- **Fast startup** - Pre-compiled WASM and PGDATA seeds reduce initialization time by 50-75%
+- **Full PostgreSQL compatibility** - Supports transactions, DDL, DML, JSONB, and complex types
 
 ## How It Works
 
-1. PGLite spawns a Bun process running the PGLite WebAssembly code
-2. Communication happens via Unix domain sockets
-3. Postgrex connects using standard PostgreSQL protocol
-4. All database operations are handled by the WebAssembly instance
+1. A Rust binary (`pglite_port`) loads PostgreSQL WASM via Wasmtime
+2. PostgreSQL runs in-process and exposes a TCP socket on localhost
+3. Postgrex connects using the standard PostgreSQL wire protocol
 
-## Configuration Options
+## Installation
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `database` | `String` | `"postgres"` | Database name |
-| `username` | `String` | `"postgres"` | Username |
-| `password` | `String` | `"password"` | Password |
-| `data_dir` | `String` | `"tmp/<random>"` | Directory for database files |
-| `memory` | `boolean` | `true` | Use in-memory storage |
-| `initial_memory` | `integer` | `nil` | Initial memory size in bytes |
-| `startup_timeout` | `integer` | `3000` | Startup timeout in milliseconds |
-| `bun_executable` | `String` | `"bun"` | Path to Bun executable |
-
-## Usage Examples
+Add to your `mix.exs`:
 
 ```elixir
-# Basic queries
-{:ok, result} = Postgrex.query(conn, "SELECT 1 as test", [])
-{:ok, _} = Postgrex.query(conn, "CREATE TABLE users (id SERIAL, name TEXT)", [])
-{:ok, _} = Postgrex.query(conn, "INSERT INTO users (name) VALUES ($1)", ["Alice"])
-
-# Transactions
-Postgrex.transaction(conn, fn conn ->
-  {:ok, _} = Postgrex.query(conn, "INSERT INTO users (name) VALUES ($1)", ["Bob"])
-  {:ok, result} = Postgrex.query(conn, "SELECT COUNT(*) FROM users", [])
-  result
-end)
-```
-
-## Storage Options
-
-```elixir
-# In-memory storage (default)
-{:ok, manager} = Pglite.start_link(memory: true)
-
-# Persistent file storage
-{:ok, manager} = Pglite.start_link(memory: false, data_dir: "data/myapp")
-```
-
-## Error Handling and Health Checks
-
-```elixir
-# Error handling
-case Pglite.start_link() do
-  {:ok, manager} -> # proceed with operations
-  {:error, :bun_not_found} -> # install Bun
-  {:error, reason} -> # handle other errors
+def deps do
+  [{:ex_pglite, "~> 0.1.0"}]
 end
+```
 
-# Health checks
-Pglite.health_check(manager)  # returns :ok or {:error, reason}
+Requires Rust 1.70+ to build the native binary during `mix compile`.
+
+## Usage
+
+```elixir
+# Start PGlite
+{:ok, pglite} = Pglite.start_link()
+
+# Connect with Postgrex
+{:ok, conn} = Postgrex.start_link(Pglite.get_connection_opts(pglite))
+
+# Run queries
+{:ok, result} = Postgrex.query(conn, "SELECT 1", [])
+```
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `memory` | `true` | Use in-memory storage (false for persistent) |
+| `data_dir` | random temp dir | Directory for persistent database files |
+| `tcp_port` | `54321` | TCP port for PostgreSQL connection |
+| `database` | `"postgres"` | Database name |
+| `username` | `"postgres"` | Username |
+| `password` | `"password"` | Password |
+| `startup_timeout` | `60000` | Startup timeout in ms |
+| `pgdata_seed_path` | auto-detected | Pre-initialized PGDATA for faster startup |
+
+The library automatically uses a pre-built PGDATA seed from `priv/pgdata_seed.tar.zst` when available, reducing startup time by ~50-75%.
+
+## Multiple Instances
+
+Each instance needs a unique TCP port:
+
+```elixir
+{:ok, db1} = Pglite.start_link(tcp_port: 54321)
+{:ok, db2} = Pglite.start_link(tcp_port: 54322)
 ```
 
 ## Testing
 
 ```elixir
-defmodule MyAppTest do
+defmodule MyTest do
   use ExUnit.Case
 
   setup do
-    {:ok, manager} = Pglite.start_link()
-    opts = Pglite.get_connection_opts(manager)
-    {:ok, conn} = Postgrex.start_link(opts)
-    on_exit(fn -> GenServer.stop(conn); GenServer.stop(manager) end)
+    {:ok, pglite} = Pglite.start_link()
+    {:ok, conn} = Postgrex.start_link(Pglite.get_connection_opts(pglite))
+    on_exit(fn -> GenServer.stop(conn); GenServer.stop(pglite) end)
     %{conn: conn}
   end
 
-  test "database operations", %{conn: conn} do
-    {:ok, _} = Postgrex.query(conn, "CREATE TABLE test (id INTEGER)", [])
+  test "queries work", %{conn: conn} do
     {:ok, result} = Postgrex.query(conn, "SELECT 1", [])
     assert result.rows == [[1]]
   end
 end
 ```
 
-## Notes
+## Building from Source
 
-- First startup takes 1-2 seconds for WebAssembly compilation
-- In-memory storage is faster but uses more RAM
-- Each instance uses unique socket paths to avoid conflicts
-- Enable debug logging with `config :logger, level: :debug`
+```bash
+git clone https://github.com/filipecabaco/ex_pglite.git
+cd ex_pglite
+make build
+mix test
+```
 
-## Contributing
+### Building Rust Artifacts
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Ensure all tests pass
-6. Submit a pull request
+The Rust port builds all tools with a single command:
+
+```bash
+cd pglite_port
+cargo build --release
+
+# Create pre-compiled WASM and PGDATA seed (faster startup)
+./target/release/build_artifacts ../priv/pglite.wasi ../priv/pglite_prefix ../priv
+
+# Copy binaries to priv
+cp target/release/pglite_port target/release/build_artifacts ../priv/bin/
+```
+
+This creates:
+- `priv/pglite.cwasm` - Pre-compiled native WASM module
+- `priv/pgdata_seed.tar.zst` - Pre-initialized PostgreSQL data directory
+
+## Compatibility
+
+- **Elixir**: 1.14+
+- **Rust**: 1.70+ (for building from source)
+- **Platforms**: macOS (arm64, x86_64), Linux (x86_64)
+
+## Limitations
+
+- **Single-process model** - Each PGlite instance runs in a single OS process; no multi-process parallelism
+- **No extensions** - PostgreSQL extensions are not supported in the WASM build
+- **Localhost only** - TCP socket binds to 127.0.0.1; not suitable for network-accessible databases
+- **Performance** - Suitable for development, testing, and lightweight workloads; not for production databases
+
+## Debug Mode
+
+Set `PGLITE_DEBUG=1` to enable verbose logging from the Rust runtime:
+
+```bash
+PGLITE_DEBUG=1 mix test
+```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [PGLite](https://github.com/electric-sql/pglite) - The WebAssembly-based PostgreSQL implementation
-- [Postgrex](https://github.com/elixir-ecto/postgrex) - The PostgreSQL driver for Elixir
-- [Bun](https://bun.sh/) - The fast JavaScript runtime
+MIT

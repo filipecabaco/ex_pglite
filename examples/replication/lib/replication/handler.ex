@@ -184,6 +184,15 @@ defmodule ReadReplica.Handler do
     {:noreply, state}
   end
 
+  def terminate(_reason, state) do
+    # Stop the replication process if it's running
+    if state.replication_pid && Process.alive?(state.replication_pid) do
+      GenServer.stop(state.replication_pid, :normal, 2000)
+    end
+
+    :ok
+  end
+
   defp dump(opts, cache_pid) do
     host = Keyword.get(opts, :host, "localhost")
     port = opts |> Keyword.get(:port, 5432) |> Integer.to_string()
@@ -225,7 +234,6 @@ defmodule ReadReplica.Handler do
     |> String.split("\n")
     |> Enum.reject(&(String.trim(&1) == ""))
     |> Enum.each(fn sql ->
-      dbg(sql)
       sql = String.trim(sql)
       Postgrex.query!(cache_pid, sql, [])
     end)
