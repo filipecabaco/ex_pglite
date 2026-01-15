@@ -32,6 +32,79 @@ This crate produces two binaries:
 | `pglite_port` | Main runtime that runs PostgreSQL and accepts TCP connections |
 | `build_artifacts` | Build tool that creates pre-compiled artifacts for faster startup |
 
+## Standalone Mode
+
+The standalone mode creates a self-contained, portable PostgreSQL distribution that can run anywhere without Elixir or additional dependencies. This is useful for:
+
+- Running PostgreSQL as a standalone service
+- Distributing a portable database with your application
+- Testing and development without the full ex_pglite setup
+
+### Building Standalone Distribution
+
+```bash
+cd pglite_port
+make standalone
+```
+
+This creates a `standalone/` directory containing everything needed to run PostgreSQL:
+
+```
+standalone/
+├── pglite_port           # Main binary (Wasmtime runtime)
+├── pglite.wasi           # PostgreSQL WASM module (~23MB)
+├── pglite.cwasm          # Pre-compiled native code (~43MB, faster startup)
+├── pglite_prefix/        # PostgreSQL share files (timezone, locale, etc.)
+├── pgdata_seed.tar.zst   # Pre-initialized database (~3.5MB)
+├── run.sh                # Convenience wrapper script
+└── README.md             # Usage instructions
+```
+
+### Running Standalone
+
+**Using the wrapper script (recommended):**
+
+```bash
+cd standalone
+
+# Start with defaults (in-memory, port 5432)
+./run.sh
+
+# Custom port
+./run.sh 5433
+
+# Persistent storage
+./run.sh 5432 /path/to/data
+```
+
+**Using the binary directly:**
+
+```bash
+./pglite_port memory:// 5432 ./pglite.wasi ./pglite_prefix ./pgdata_seed.tar.zst
+```
+
+### Connecting to Standalone
+
+Default credentials are `postgres` / `password`:
+
+```bash
+# Using psql
+PGPASSWORD=password psql "host=127.0.0.1 port=5432 user=postgres dbname=template1 sslmode=disable"
+
+# Using any PostgreSQL client
+postgresql://postgres:password@127.0.0.1:5432/template1
+```
+
+### Distributing Standalone
+
+The `standalone/` directory is fully portable. To distribute:
+
+1. Build with `make standalone`
+2. Copy or archive the entire `standalone/` directory
+3. Users run `./run.sh` on the target machine
+
+The only requirement on the target machine is a compatible OS (Linux x86_64 or macOS arm64/x86_64).
+
 ## Usage
 
 ### pglite_port
