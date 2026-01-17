@@ -853,18 +853,36 @@ impl QueryBatcher {
 
 ## Recommended Implementation Path
 
-### Phase 1: Async Query Queue (Foundation)
+### Phase 1: Query Queue (Foundation) - ✅ COMPLETED
 
-1. Add `tokio` to dependencies
-2. Implement basic `ConnectionMultiplexer` (Solution 1)
-3. Replace thread-per-connection with async tasks
-4. Add MPSC queue for query serialization
+**Status:** Implemented using `std` library only (no external dependencies like tokio).
 
-**Files to modify:**
-- `Cargo.toml` - add tokio
-- `src/lib.rs` - add new module
-- `src/main.rs` - switch to async runtime
-- `src/multiplexer.rs` - new file
+**What was implemented:**
+1. `src/multiplexer.rs` - Connection multiplexer with query queue
+2. `MultiplexerMode` enum - Extensible for future modes (None, QueryQueue)
+3. `MultiplexerConfig` struct - Configuration options
+4. MPSC-based query queue using `std::sync::mpsc`
+5. Command-line arguments for configuration
+
+**Usage:**
+```bash
+# Direct mode (original behavior)
+pglite_port <data_dir> <port> <wasm> <prefix> --multiplexer none
+
+# Query queue mode (new multiplexer)
+pglite_port <data_dir> <port> <wasm> <prefix> --multiplexer queue
+
+# With options
+pglite_port <data_dir> <port> <wasm> <prefix> \
+  --multiplexer queue \
+  --queue-size 500 \
+  --query-timeout 60000
+```
+
+**Files modified:**
+- `src/multiplexer.rs` - new file with multiplexer implementation
+- `src/lib.rs` - exports multiplexer module
+- `src/main.rs` - argument parsing and mode selection
 
 ### Phase 2: Transaction Awareness
 
@@ -892,31 +910,41 @@ impl QueryBatcher {
 
 ## Configuration Options
 
-Add these to `PgliteConfig`:
+**Implemented** - `MultiplexerConfig` struct:
 
 ```rust
-pub struct PgliteConfig {
-    // ... existing fields ...
+/// Multiplexer mode - extensible for future implementations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MultiplexerMode {
+    #[default]
+    None,       // Direct thread-per-connection (original behavior)
+    QueryQueue, // Query queue serialization
+    // Future: TransactionAware, VirtualSessions
+}
 
-    /// Enable connection multiplexing (default: true)
-    pub enable_multiplexing: bool,
+/// Configuration for the multiplexer
+#[derive(Debug, Clone)]
+pub struct MultiplexerConfig {
+    /// The multiplexer mode to use
+    pub mode: MultiplexerMode,
 
-    /// Maximum queued queries (default: 1000)
-    pub max_queue_size: usize,
+    /// Maximum number of queued queries (for QueryQueue mode)
+    pub max_queue_size: usize,  // default: 1000
 
-    /// Query timeout in milliseconds (default: 30000)
-    pub query_timeout_ms: u64,
-
-    /// Enable transaction-aware scheduling (default: true)
-    pub transaction_aware: bool,
-
-    /// Enable virtual session support (default: false)
-    pub virtual_sessions: bool,
-
-    /// Query batch window in milliseconds (0 = disabled)
-    pub batch_window_ms: u64,
+    /// Query timeout in milliseconds (0 = no timeout)
+    pub query_timeout_ms: u64,  // default: 30000
 }
 ```
+
+**Command-line arguments:**
+- `--multiplexer <mode>` - Select mode: `none`, `queue`
+- `--queue-size <n>` - Max queued queries
+- `--query-timeout <ms>` - Query timeout
+
+**Future configuration options** (to be added in later phases):
+- `transaction_aware: bool` - Enable transaction-aware scheduling
+- `virtual_sessions: bool` - Enable virtual session support
+- `batch_window_ms: u64` - Query batch window
 
 ---
 
