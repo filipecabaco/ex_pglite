@@ -7,6 +7,9 @@ use wasmtime::{Config, Engine, Linker, Memory, Module, Store, Val};
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
+pub mod multiplexer;
+pub use multiplexer::{MultiplexerConfig, MultiplexerMode};
+
 struct WireMessage<'a> {
     msg_type: u8,
     payload: &'a [u8],
@@ -533,7 +536,7 @@ pub fn bind_tcp_socket(port: u16) -> Result<TcpListener> {
     TcpListener::bind(("127.0.0.1", port)).context(format!("Failed to bind to port {}", port))
 }
 
-fn create_error_response_from_trap(trap_error: &str) -> Vec<u8> {
+pub fn create_error_response_from_trap(trap_error: &str) -> Vec<u8> {
     let (error_code, known_message) = detect_error_from_trap(trap_error);
 
     let error_message = match known_message {
@@ -612,7 +615,7 @@ fn find_ready_for_query(response: &[u8]) -> Option<usize> {
     None
 }
 
-fn ensure_server_version(
+pub fn ensure_server_version(
     response: Vec<u8>,
     has_sent_server_version: &mut bool,
 ) -> Vec<u8> {
