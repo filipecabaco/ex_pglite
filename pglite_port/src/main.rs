@@ -135,11 +135,9 @@ fn parse_args() -> Result<ParsedArgs> {
                 if i >= args.len() {
                     anyhow::bail!("--multiplexer requires a mode argument (none, queue)");
                 }
-                multiplexer_config.mode = MultiplexerMode::from_str(&args[i])
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "Invalid multiplexer mode '{}'. Valid modes: none, queue",
-                        args[i]
-                    ))?;
+                multiplexer_config.mode = args[i]
+                    .parse()
+                    .context("Invalid multiplexer mode")?;
             }
             "--queue-size" => {
                 i += 1;

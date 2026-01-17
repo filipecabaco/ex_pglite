@@ -8,7 +8,7 @@ use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 pub mod multiplexer;
-pub use multiplexer::{MultiplexerConfig, MultiplexerMode};
+pub use multiplexer::{MultiplexerConfig, MultiplexerMode, ParseMultiplexerModeError};
 
 struct WireMessage<'a> {
     msg_type: u8,
