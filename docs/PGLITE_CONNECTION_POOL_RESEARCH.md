@@ -1,59 +1,26 @@
-# PGLite Connection Pool Research: Handling Single-Connection Limitation
+# PGLite Connection Multiplexer Research: Rust-Level Solutions
 
 ## Problem Statement
 
 PGLite (PostgreSQL compiled to WebAssembly) has a fundamental limitation: **it only supports a single connection at a time**. This is due to:
 
 1. The WASM store mutex (`Arc<Mutex<Store<WasiP1Ctx>>>`) that serializes all queries
-2. A single 64KB shared buffer for query/response data
+2. A single shared 64KB buffer for query/response data
 3. No multi-process architecture in the WASM runtime
 
-This limitation prevents running complex scenarios that require:
-- Multiple concurrent database connections (e.g., Ecto with pool_size > 1)
-- Parallel query execution
-- Testing concurrent transaction behavior
-- Connection pooling with multiple workers
+This document focuses on **Rust-level solutions** implemented in `pglite_port` that would work across all language bindings (Elixir, Python, Node.js, Go, etc.).
+
+---
 
 ## Current Architecture Analysis
 
-### How Connections Work Today
+### Bottleneck Location
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Client Applications                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐                      │
-│  │ Postgrex │  │ Postgrex │  │ Postgrex │  (Multiple clients)   │
-│  │  Conn 1  │  │  Conn 2  │  │  Conn 3  │                      │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘                      │
-└───────┼─────────────┼─────────────┼────────────────────────────┘
-        │             │             │
-        ▼             ▼             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              TCP Listener (127.0.0.1:54321)                     │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │           Spawns thread per connection                    │  │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐                   │  │
-│  │  │Thread 1 │  │Thread 2 │  │Thread 3 │                   │  │
-│  │  └────┬────┘  └────┬────┘  └────┬────┘                   │  │
-│  └───────┼───────────┼───────────┼──────────────────────────┘  │
-│          │           │           │                              │
-│          ▼           ▼           ▼                              │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │              BOTTLENECK: store.lock().unwrap()            │  │
-│  │  ┌────────────────────────────────────────────────────┐  │  │
-│  │  │            Arc<Mutex<Store<WasiP1Ctx>>>            │  │  │
-│  │  │                                                     │  │  │
-│  │  │  Only ONE query can execute at a time!             │  │  │
-│  │  └────────────────────────────────────────────────────┘  │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Key Bottleneck Code (lib.rs:499-520)
+The serialization happens in `lib.rs:499-520`:
 
 ```rust
 pub fn process_wire_message(&self, data: &[u8]) -> Result<Vec<u8>> {
-    let mut store = self.store.lock().unwrap();  // <-- SERIALIZATION POINT
+    let mut store = self.store.lock().unwrap();  // <-- ALL QUERIES SERIALIZE HERE
 
     self.write_to_buffer_locked(&mut store, data)?;
     self.interactive_write_locked(&mut store, data.len())?;
@@ -61,634 +28,1026 @@ pub fn process_wire_message(&self, data: &[u8]) -> Result<Vec<u8>> {
 }
 ```
 
+### Current Connection Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       main.rs:189                               │
+│                                                                 │
+│   loop {                                                        │
+│       match listener.accept() {                                 │
+│           Ok((stream, addr)) => {                              │
+│               let runtime = Arc::clone(&runtime);               │
+│               std::thread::spawn(move || {                      │
+│                   handle_connection(stream, runtime)  ──────┐  │
+│               });                                            │  │
+│           }                                                  │  │
+│       }                                                      │  │
+│   }                                                          │  │
+└──────────────────────────────────────────────────────────────┼──┘
+                                                               │
+                                                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       lib.rs:643-669                            │
+│                                                                 │
+│   pub fn handle_connection(stream, runtime) {                   │
+│       loop {                                                    │
+│           let n = stream.read(&mut buf)?;                       │
+│           let response = runtime.process_wire_message(&buf)?; ─┐│
+│           stream.write_all(&response)?;                        ││
+│       }                                                        ││
+│   }                                                            ││
+└────────────────────────────────────────────────────────────────┼┘
+                                                                 │
+                                                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       lib.rs:499-520                            │
+│                                                                 │
+│   pub fn process_wire_message(&self, data) -> Vec<u8> {         │
+│       let mut store = self.store.lock().unwrap();  // MUTEX!   │
+│       // ... Only ONE query executes at a time ...             │
+│   }                                                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
-## Proposed Solutions
+## Proposed Rust-Level Solutions
 
-### Solution 1: Reverse Connection Pool (Query Queue Serializer)
+### Solution 1: Async Query Queue (Recommended First Step)
 
-**Concept**: Accept multiple PostgreSQL connections but serialize all queries through a single internal queue, presenting the illusion of concurrent connections while internally processing them sequentially.
+Replace the thread-per-connection model with an async runtime that queues queries.
 
 #### Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Client Applications                          │
+│                    TCP Connections                              │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐                      │
-│  │ Postgrex │  │ Postgrex │  │ Postgrex │                      │
+│  │ Client 1 │  │ Client 2 │  │ Client 3 │                      │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘                      │
 └───────┼─────────────┼─────────────┼────────────────────────────┘
         │             │             │
         ▼             ▼             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│              Connection Multiplexer (New Component)             │
+│              Tokio Async Runtime (NEW)                          │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │                 Virtual Connection Pool                   │  │
+│  │         Connection Handler Tasks (per connection)        │  │
 │  │  ┌─────────┐  ┌─────────┐  ┌─────────┐                   │  │
-│  │  │VConn 1  │  │VConn 2  │  │VConn 3  │                   │  │
-│  │  │(session)│  │(session)│  │(session)│                   │  │
+│  │  │ Task 1  │  │ Task 2  │  │ Task 3  │                   │  │
+│  │  │(waiting)│  │(waiting)│  │(waiting)│                   │  │
 │  │  └────┬────┘  └────┬────┘  └────┬────┘                   │  │
-│  │       │           │           │                           │  │
-│  │       ▼           ▼           ▼                           │  │
+│  └───────┼───────────┼───────────┼──────────────────────────┘  │
+│          │           │           │                              │
+│          ▼           ▼           ▼                              │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │              MPSC Query Queue                             │  │
 │  │  ┌────────────────────────────────────────────────────┐  │  │
-│  │  │              Query Queue (FIFO + Priority)          │  │  │
-│  │  │  [Query1, Query2, Query3, ...]                     │  │  │
-│  │  └────────────────────┬───────────────────────────────┘  │  │
-│  └───────────────────────┼──────────────────────────────────┘  │
+│  │  │  QueryRequest { conn_id, wire_msg, response_tx }   │  │  │
+│  │  │  QueryRequest { conn_id, wire_msg, response_tx }   │  │  │
+│  │  │  QueryRequest { conn_id, wire_msg, response_tx }   │  │  │
+│  │  └────────────────────────────────────────────────────┘  │  │
+│  └──────────────────────────────────────────────────────────┘  │
 │                          │                                      │
 │                          ▼                                      │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │              Single Backend Connection                    │  │
-│  │                   to PGLite WASM                          │  │
+│  │              Query Executor (Single Task)                 │  │
+│  │                                                           │  │
+│  │  loop {                                                   │  │
+│  │      let req = queue.recv().await;                       │  │
+│  │      let response = runtime.process_wire_message(req);   │  │
+│  │      req.response_tx.send(response);                     │  │
+│  │  }                                                        │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### Implementation Options
-
-##### Option 1A: Rust-Level Multiplexer (in pglite_port)
-
-Modify the Rust code to implement multiplexing at the TCP level:
+#### Implementation
 
 ```rust
-// New: Query queue with per-connection state tracking
-struct QueryRequest {
-    connection_id: u64,
-    wire_message: Vec<u8>,
-    response_channel: oneshot::Sender<Vec<u8>>,
+// New file: src/multiplexer.rs
+
+use tokio::sync::{mpsc, oneshot};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+
+/// A query request sent from a connection handler to the executor
+pub struct QueryRequest {
+    /// Unique connection identifier
+    pub connection_id: u64,
+    /// Raw PostgreSQL wire protocol message
+    pub wire_message: Vec<u8>,
+    /// Channel to send the response back
+    pub response_tx: oneshot::Sender<Vec<u8>>,
 }
 
-struct ConnectionMultiplexer {
+/// The connection multiplexer that manages all connections
+pub struct ConnectionMultiplexer {
     runtime: Arc<PgliteRuntime>,
-    query_queue: mpsc::Receiver<QueryRequest>,
-    connection_states: HashMap<u64, ConnectionState>,
-}
-
-struct ConnectionState {
-    transaction_status: TransactionStatus,  // Idle, InTransaction, Error
-    session_variables: HashMap<String, String>,
-    prepared_statements: HashMap<String, PreparedStatement>,
+    query_tx: mpsc::Sender<QueryRequest>,
 }
 
 impl ConnectionMultiplexer {
-    async fn run(&mut self) {
-        while let Some(request) = self.query_queue.recv().await {
-            // Apply connection-specific state if needed
-            self.apply_session_state(request.connection_id);
+    pub fn new(runtime: Arc<PgliteRuntime>, queue_size: usize) -> (Self, mpsc::Receiver<QueryRequest>) {
+        let (query_tx, query_rx) = mpsc::channel(queue_size);
+        (Self { runtime, query_tx }, query_rx)
+    }
 
-            // Process query
-            let response = self.runtime.process_wire_message(&request.wire_message);
+    /// Spawn the query executor task - processes queries sequentially
+    pub fn spawn_executor(runtime: Arc<PgliteRuntime>, mut query_rx: mpsc::Receiver<QueryRequest>) {
+        tokio::spawn(async move {
+            while let Some(request) = query_rx.recv().await {
+                // Process query on the single PGLite backend
+                let response = runtime.process_wire_message(&request.wire_message)
+                    .unwrap_or_else(|e| create_error_response(&e.to_string()));
 
-            // Update connection state based on response
-            self.update_connection_state(request.connection_id, &response);
+                // Send response back to waiting connection
+                let _ = request.response_tx.send(response);
+            }
+        });
+    }
 
-            // Send response back to waiting connection
-            let _ = request.response_channel.send(response);
+    /// Handle a single client connection
+    pub async fn handle_connection(
+        mut stream: TcpStream,
+        connection_id: u64,
+        query_tx: mpsc::Sender<QueryRequest>,
+    ) -> Result<()> {
+        stream.set_nodelay(true)?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut has_sent_server_version = false;
+
+        loop {
+            let n = match stream.read(&mut buf).await {
+                Ok(0) => break,  // Connection closed
+                Ok(n) => n,
+                Err(e) => return Err(e.into()),
+            };
+
+            // Create response channel
+            let (response_tx, response_rx) = oneshot::channel();
+
+            // Send query to executor
+            let request = QueryRequest {
+                connection_id,
+                wire_message: buf[..n].to_vec(),
+                response_tx,
+            };
+
+            query_tx.send(request).await
+                .map_err(|_| anyhow::anyhow!("Query executor shut down"))?;
+
+            // Wait for response
+            let response = response_rx.await
+                .map_err(|_| anyhow::anyhow!("Query executor dropped response"))?;
+
+            if !response.is_empty() {
+                let response = ensure_server_version(response, &mut has_sent_server_version);
+                stream.write_all(&response).await?;
+                stream.flush().await?;
+            }
         }
+
+        Ok(())
+    }
+}
+
+/// Main entry point with async runtime
+pub async fn run_multiplexed_server(runtime: Arc<PgliteRuntime>, port: u16) -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+
+    // Create multiplexer with queue
+    let (multiplexer, query_rx) = ConnectionMultiplexer::new(Arc::clone(&runtime), 1000);
+
+    // Spawn the single query executor
+    ConnectionMultiplexer::spawn_executor(runtime, query_rx);
+
+    let mut connection_id: u64 = 0;
+
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        connection_id += 1;
+
+        let query_tx = multiplexer.query_tx.clone();
+        let conn_id = connection_id;
+
+        tokio::spawn(async move {
+            if let Err(e) = ConnectionMultiplexer::handle_connection(stream, conn_id, query_tx).await {
+                eprintln!("Connection {} error: {:?}", conn_id, e);
+            }
+        });
     }
 }
 ```
 
-**Pros**:
-- Handles multiplexing at the optimal level (closest to PGLite)
-- Can track per-connection state (transactions, session variables)
-- Minimal latency overhead
+#### Cargo.toml Changes
 
-**Cons**:
-- Complex state management
-- Requires handling transaction boundaries carefully
-- Needs to emulate PostgreSQL session behavior
-
-##### Option 1B: Elixir-Level Multiplexer (new GenServer)
-
-Create an Elixir GenServer that acts as a connection proxy:
-
-```elixir
-defmodule Pglite.ConnectionPool do
-  use GenServer
-
-  defstruct [:pglite, :internal_conn, :queue, :current_request]
-
-  def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts)
-  end
-
-  # Client API - appears like a normal Postgrex connection
-  def query(pool, query, params, opts \\ []) do
-    GenServer.call(pool, {:query, query, params, opts}, :infinity)
-  end
-
-  # Checkout a virtual connection
-  def checkout(pool) do
-    GenServer.call(pool, :checkout)
-  end
-
-  @impl true
-  def init(opts) do
-    {:ok, pglite} = Pglite.start_link(opts)
-    {:ok, conn} = Postgrex.start_link(Pglite.get_connection_opts(pglite))
-
-    {:ok, %__MODULE__{
-      pglite: pglite,
-      internal_conn: conn,
-      queue: :queue.new(),
-      current_request: nil
-    }}
-  end
-
-  @impl true
-  def handle_call({:query, query, params, opts}, from, state) do
-    request = {from, query, params, opts}
-    new_state = enqueue_and_process(%{state | queue: :queue.in(request, state.queue)})
-    {:noreply, new_state}
-  end
-
-  defp enqueue_and_process(%{current_request: nil} = state) do
-    case :queue.out(state.queue) do
-      {{:value, {from, query, params, opts}}, rest} ->
-        # Execute query on the single internal connection
-        result = Postgrex.query(state.internal_conn, query, params, opts)
-        GenServer.reply(from, result)
-        enqueue_and_process(%{state | queue: rest, current_request: nil})
-
-      {:empty, _} ->
-        state
-    end
-  end
-
-  defp enqueue_and_process(state), do: state
-end
-```
-
-**Pros**:
-- Simpler implementation in Elixir
-- Easy to integrate with existing supervision trees
-- Can leverage Elixir's excellent concurrency primitives
-
-**Cons**:
-- Additional serialization overhead (Elixir → Postgrex → TCP → Rust)
-- Harder to maintain per-connection session state
-
----
-
-### Solution 2: Transaction-Aware Multiplexer
-
-A more sophisticated approach that understands PostgreSQL transaction semantics:
-
-```elixir
-defmodule Pglite.TransactionAwarePool do
-  @moduledoc """
-  Multiplexes multiple virtual connections over a single PGLite connection,
-  with awareness of transaction boundaries.
-
-  Key insight: Only ONE transaction can be active at a time on a single connection.
-  Non-transactional queries can be interleaved safely.
-  """
-
-  defstruct [
-    :pglite,
-    :conn,
-    :active_transaction,      # {connection_id, transaction_state}
-    :waiting_transactions,    # Queue of connections waiting for transaction
-    :simple_query_queue       # Queue for non-transactional queries
-  ]
-
-  def handle_call({:begin_transaction, conn_id}, from, state) do
-    case state.active_transaction do
-      nil ->
-        # No active transaction, this connection gets it
-        result = execute_on_backend(state.conn, "BEGIN")
-        {:reply, result, %{state | active_transaction: {conn_id, :in_transaction}}}
-
-      {^conn_id, _} ->
-        # This connection already owns the transaction (nested BEGIN - PostgreSQL ignores)
-        {:reply, {:ok, :already_in_transaction}, state}
-
-      {_other_conn_id, _} ->
-        # Another connection owns the transaction, queue this one
-        new_waiting = :queue.in({from, conn_id}, state.waiting_transactions)
-        {:noreply, %{state | waiting_transactions: new_waiting}}
-    end
-  end
-
-  def handle_call({:commit, conn_id}, _from, state) do
-    case state.active_transaction do
-      {^conn_id, :in_transaction} ->
-        result = execute_on_backend(state.conn, "COMMIT")
-        new_state = release_transaction_and_process_next(state)
-        {:reply, result, new_state}
-
-      _ ->
-        {:reply, {:error, :not_in_transaction}, state}
-    end
-  end
-
-  # Simple queries (no transaction) can execute immediately if no transaction is active
-  # or queue behind the current transaction
-  def handle_call({:simple_query, query, params}, from, state) do
-    case state.active_transaction do
-      nil ->
-        # No transaction, execute immediately
-        result = Postgrex.query(state.conn, query, params)
-        {:reply, result, state}
-
-      _ ->
-        # Transaction active, queue the query
-        new_queue = :queue.in({from, query, params}, state.simple_query_queue)
-        {:noreply, %{state | simple_query_queue: new_queue}}
-    end
-  end
-end
+```toml
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+# ... existing deps
 ```
 
 ---
 
-### Solution 3: Virtual Backend Sessions (Most Sophisticated)
+### Solution 2: Transaction-Aware Scheduler
 
-Implement virtual PostgreSQL sessions that share a single backend, tracking all session state per virtual connection:
+Builds on Solution 1 by understanding PostgreSQL transaction semantics.
+
+#### Key Insight
+
+- Only ONE connection can have an active transaction at a time
+- Non-transactional queries can be freely interleaved
+- Transaction state must be tracked per-connection
+
+#### Implementation
 
 ```rust
-// Rust implementation for maximum control
-struct VirtualSession {
-    id: u64,
+// src/transaction_scheduler.rs
 
-    // PostgreSQL session state to restore when this session runs
-    search_path: String,
-    timezone: String,
-    client_encoding: String,
-    application_name: String,
+use std::collections::{HashMap, VecDeque};
 
-    // Transaction state
-    transaction_status: TransactionStatus,
-    savepoints: Vec<String>,
-
-    // Prepared statements (name -> SQL)
-    prepared_statements: HashMap<String, String>,
-
-    // Cursors (name -> state)
-    cursors: HashMap<String, CursorState>,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransactionState {
+    Idle,           // No active transaction
+    InTransaction,  // BEGIN executed, waiting for COMMIT/ROLLBACK
+    Failed,         // Transaction aborted, needs ROLLBACK
 }
 
-struct SessionManager {
+#[derive(Debug)]
+pub struct ConnectionState {
+    pub id: u64,
+    pub transaction_state: TransactionState,
+    pub pending_queries: VecDeque<PendingQuery>,
+}
+
+pub struct PendingQuery {
+    pub wire_message: Vec<u8>,
+    pub response_tx: oneshot::Sender<Vec<u8>>,
+}
+
+pub struct TransactionScheduler {
+    runtime: Arc<PgliteRuntime>,
+    connections: HashMap<u64, ConnectionState>,
+
+    /// Connection ID that currently owns the transaction lock (if any)
+    transaction_owner: Option<u64>,
+
+    /// Queue of connections waiting to start a transaction
+    transaction_waiters: VecDeque<u64>,
+}
+
+impl TransactionScheduler {
+    pub fn new(runtime: Arc<PgliteRuntime>) -> Self {
+        Self {
+            runtime,
+            connections: HashMap::new(),
+            transaction_owner: None,
+            transaction_waiters: VecDeque::new(),
+        }
+    }
+
+    /// Process a query from a connection
+    pub fn process_query(&mut self, conn_id: u64, wire_message: &[u8]) -> QueryResult {
+        let query_type = self.detect_query_type(wire_message);
+
+        match query_type {
+            QueryType::Begin => self.handle_begin(conn_id, wire_message),
+            QueryType::Commit | QueryType::Rollback => self.handle_end_transaction(conn_id, wire_message),
+            QueryType::Other => self.handle_regular_query(conn_id, wire_message),
+        }
+    }
+
+    fn handle_begin(&mut self, conn_id: u64, wire_message: &[u8]) -> QueryResult {
+        match self.transaction_owner {
+            None => {
+                // No active transaction, this connection gets it
+                self.transaction_owner = Some(conn_id);
+                self.update_connection_state(conn_id, TransactionState::InTransaction);
+                self.execute_immediately(wire_message)
+            }
+            Some(owner) if owner == conn_id => {
+                // This connection already owns the transaction (nested BEGIN)
+                // PostgreSQL ignores nested BEGIN, just execute it
+                self.execute_immediately(wire_message)
+            }
+            Some(_other) => {
+                // Another connection owns the transaction, queue this one
+                QueryResult::Queued
+            }
+        }
+    }
+
+    fn handle_end_transaction(&mut self, conn_id: u64, wire_message: &[u8]) -> QueryResult {
+        if self.transaction_owner == Some(conn_id) {
+            let result = self.execute_immediately(wire_message);
+
+            // Release transaction lock
+            self.transaction_owner = None;
+            self.update_connection_state(conn_id, TransactionState::Idle);
+
+            // Wake up next waiting connection
+            self.process_next_waiter();
+
+            result
+        } else {
+            // Not in a transaction or wrong connection
+            self.execute_immediately(wire_message)  // Let PostgreSQL return the error
+        }
+    }
+
+    fn handle_regular_query(&mut self, conn_id: u64, wire_message: &[u8]) -> QueryResult {
+        match self.transaction_owner {
+            None => {
+                // No active transaction, execute immediately
+                self.execute_immediately(wire_message)
+            }
+            Some(owner) if owner == conn_id => {
+                // This connection owns the transaction, execute immediately
+                self.execute_immediately(wire_message)
+            }
+            Some(_other) => {
+                // Another connection owns the transaction
+                // Queue this query until the transaction completes
+                QueryResult::Queued
+            }
+        }
+    }
+
+    fn detect_query_type(&self, wire_message: &[u8]) -> QueryType {
+        // Parse the wire message to detect BEGIN/COMMIT/ROLLBACK
+        // This is a simplified version - full implementation needs to handle
+        // prepared statements, extended query protocol, etc.
+
+        if wire_message.is_empty() || wire_message[0] != b'Q' {
+            return QueryType::Other;
+        }
+
+        // Skip message type and length to get query text
+        if wire_message.len() < 6 {
+            return QueryType::Other;
+        }
+
+        let query_start = 5;
+        let query = &wire_message[query_start..];
+        let query_upper: String = query.iter()
+            .take_while(|&&b| b != 0)
+            .map(|&b| (b as char).to_ascii_uppercase())
+            .collect();
+
+        let trimmed = query_upper.trim_start();
+
+        if trimmed.starts_with("BEGIN") || trimmed.starts_with("START TRANSACTION") {
+            QueryType::Begin
+        } else if trimmed.starts_with("COMMIT") || trimmed.starts_with("END") {
+            QueryType::Commit
+        } else if trimmed.starts_with("ROLLBACK") || trimmed.starts_with("ABORT") {
+            QueryType::Rollback
+        } else {
+            QueryType::Other
+        }
+    }
+
+    fn execute_immediately(&self, wire_message: &[u8]) -> QueryResult {
+        match self.runtime.process_wire_message(wire_message) {
+            Ok(response) => QueryResult::Response(response),
+            Err(e) => QueryResult::Response(create_error_response(&e.to_string())),
+        }
+    }
+
+    fn process_next_waiter(&mut self) {
+        if let Some(next_conn_id) = self.transaction_waiters.pop_front() {
+            if let Some(conn_state) = self.connections.get_mut(&next_conn_id) {
+                if let Some(pending) = conn_state.pending_queries.pop_front() {
+                    // Execute the pending BEGIN
+                    self.transaction_owner = Some(next_conn_id);
+                    conn_state.transaction_state = TransactionState::InTransaction;
+
+                    let response = self.execute_immediately(&pending.wire_message);
+                    if let QueryResult::Response(data) = response {
+                        let _ = pending.response_tx.send(data);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum QueryType {
+    Begin,
+    Commit,
+    Rollback,
+    Other,
+}
+
+pub enum QueryResult {
+    Response(Vec<u8>),
+    Queued,
+}
+```
+
+---
+
+### Solution 3: Virtual PostgreSQL Sessions
+
+Full session state tracking to emulate multiple independent PostgreSQL sessions.
+
+#### Session State to Track
+
+```rust
+// src/virtual_session.rs
+
+use std::collections::HashMap;
+
+/// Represents a virtual PostgreSQL session
+#[derive(Debug, Clone)]
+pub struct VirtualSession {
+    pub id: u64,
+
+    // Session variables (SET commands)
+    pub search_path: String,
+    pub timezone: String,
+    pub client_encoding: String,
+    pub application_name: String,
+    pub statement_timeout: u32,
+    pub lock_timeout: u32,
+    pub work_mem: String,
+
+    // Custom GUC variables
+    pub custom_variables: HashMap<String, String>,
+
+    // Transaction state
+    pub transaction_state: TransactionState,
+    pub savepoints: Vec<String>,
+
+    // Prepared statements (name -> SQL definition)
+    pub prepared_statements: HashMap<String, PreparedStatement>,
+
+    // Cursors (name -> cursor state)
+    pub cursors: HashMap<String, CursorState>,
+
+    // Listen/Notify channels
+    pub listen_channels: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedStatement {
+    pub name: String,
+    pub sql: String,
+    pub param_types: Vec<u32>,  // OIDs
+}
+
+#[derive(Debug, Clone)]
+pub struct CursorState {
+    pub name: String,
+    pub query: String,
+    pub position: u64,
+    pub is_holdable: bool,
+}
+
+impl VirtualSession {
+    pub fn new(id: u64) -> Self {
+        Self {
+            id,
+            search_path: "\"$user\", public".to_string(),
+            timezone: "UTC".to_string(),
+            client_encoding: "UTF8".to_string(),
+            application_name: String::new(),
+            statement_timeout: 0,
+            lock_timeout: 0,
+            work_mem: "4MB".to_string(),
+            custom_variables: HashMap::new(),
+            transaction_state: TransactionState::Idle,
+            savepoints: Vec::new(),
+            prepared_statements: HashMap::new(),
+            cursors: HashMap::new(),
+            listen_channels: Vec::new(),
+        }
+    }
+
+    /// Generate SQL to restore this session's state
+    pub fn generate_restore_sql(&self) -> String {
+        let mut statements = Vec::new();
+
+        // Restore session variables
+        statements.push(format!("SET search_path TO {}", self.search_path));
+        statements.push(format!("SET timezone TO '{}'", self.timezone));
+        statements.push(format!("SET client_encoding TO '{}'", self.client_encoding));
+
+        if !self.application_name.is_empty() {
+            statements.push(format!("SET application_name TO '{}'", self.application_name));
+        }
+
+        if self.statement_timeout > 0 {
+            statements.push(format!("SET statement_timeout TO {}", self.statement_timeout));
+        }
+
+        // Restore custom variables
+        for (name, value) in &self.custom_variables {
+            statements.push(format!("SET {} TO '{}'", name, value));
+        }
+
+        // Restore prepared statements
+        for (name, stmt) in &self.prepared_statements {
+            statements.push(format!("PREPARE {} AS {}", name, stmt.sql));
+        }
+
+        // Restore LISTEN channels
+        for channel in &self.listen_channels {
+            statements.push(format!("LISTEN {}", channel));
+        }
+
+        statements.join("; ")
+    }
+}
+
+/// Session manager that handles context switching
+pub struct SessionManager {
     runtime: Arc<PgliteRuntime>,
     sessions: HashMap<u64, VirtualSession>,
-    query_queue: VecDeque<(u64, Vec<u8>, oneshot::Sender<Vec<u8>>)>,
+    current_session: Option<u64>,
 }
 
 impl SessionManager {
-    fn switch_to_session(&self, session_id: u64) -> Result<()> {
-        let session = self.sessions.get(&session_id)?;
+    pub fn new(runtime: Arc<PgliteRuntime>) -> Self {
+        Self {
+            runtime,
+            sessions: HashMap::new(),
+            current_session: None,
+        }
+    }
 
-        // Restore session variables
-        self.execute_internal(&format!(
-            "SET search_path TO {}; SET timezone TO '{}'; SET client_encoding TO '{}';",
-            session.search_path,
-            session.timezone,
-            session.client_encoding
-        ))?;
+    /// Create a new virtual session
+    pub fn create_session(&mut self) -> u64 {
+        let id = self.sessions.len() as u64 + 1;
+        self.sessions.insert(id, VirtualSession::new(id));
+        id
+    }
+
+    /// Switch to a different session, restoring its state
+    pub fn switch_to_session(&mut self, session_id: u64) -> Result<()> {
+        if self.current_session == Some(session_id) {
+            return Ok(());  // Already on this session
+        }
+
+        // Save current session state if any
+        if let Some(current_id) = self.current_session {
+            self.save_session_state(current_id)?;
+        }
+
+        // Restore new session state
+        if let Some(session) = self.sessions.get(&session_id) {
+            let restore_sql = session.generate_restore_sql();
+            if !restore_sql.is_empty() {
+                // Execute restore SQL internally
+                self.execute_internal(&restore_sql)?;
+            }
+        }
+
+        self.current_session = Some(session_id);
+        Ok(())
+    }
+
+    /// Process a query for a specific session
+    pub fn process_query(&mut self, session_id: u64, wire_message: &[u8]) -> Result<Vec<u8>> {
+        // Switch to the session if needed
+        self.switch_to_session(session_id)?;
+
+        // Execute the query
+        let response = self.runtime.process_wire_message(wire_message)?;
+
+        // Update session state based on the query and response
+        self.update_session_from_query(session_id, wire_message, &response)?;
+
+        Ok(response)
+    }
+
+    fn update_session_from_query(&mut self, session_id: u64, wire_message: &[u8], response: &[u8]) -> Result<()> {
+        // Parse wire message to detect:
+        // - SET commands -> update session variables
+        // - PREPARE -> add to prepared_statements
+        // - DEALLOCATE -> remove from prepared_statements
+        // - DECLARE CURSOR -> add to cursors
+        // - CLOSE -> remove from cursors
+        // - LISTEN -> add to listen_channels
+        // - UNLISTEN -> remove from listen_channels
+        // - BEGIN/COMMIT/ROLLBACK -> update transaction_state
+        // - SAVEPOINT/RELEASE/ROLLBACK TO -> update savepoints
+
+        // This is a simplified version - full implementation needs wire protocol parsing
+
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            // Update transaction state from ReadyForQuery response
+            if let Some(tx_status) = self.extract_transaction_status(response) {
+                session.transaction_state = tx_status;
+            }
+        }
 
         Ok(())
     }
 
-    fn process_query(&mut self, session_id: u64, wire_message: &[u8]) -> Vec<u8> {
-        // Switch session context
-        self.switch_to_session(session_id);
-
-        // Execute query
-        let response = self.runtime.process_wire_message(wire_message);
-
-        // Update session state based on response
-        self.update_session_from_response(session_id, &response);
-
-        response
+    fn extract_transaction_status(&self, response: &[u8]) -> Option<TransactionState> {
+        // Find ReadyForQuery message and extract transaction status
+        for msg in WireMessageIter::new(response) {
+            if msg.msg_type == b'Z' && !msg.payload.is_empty() {
+                return match msg.payload[0] {
+                    b'I' => Some(TransactionState::Idle),
+                    b'T' => Some(TransactionState::InTransaction),
+                    b'E' => Some(TransactionState::Failed),
+                    _ => None,
+                };
+            }
+        }
+        None
     }
 }
 ```
 
 ---
 
-### Solution 4: Read Replica Pattern (Multiple WASM Instances)
+### Solution 4: Priority Queue with Fair Scheduling
 
-For read-heavy workloads, maintain multiple PGLite instances with periodic synchronization:
+For scenarios where some queries need priority (e.g., heartbeats, admin queries).
 
-```elixir
-defmodule Pglite.ReadReplicaPool do
-  @moduledoc """
-  Maintains a primary instance for writes and multiple read replicas.
-  Replicas are periodically synchronized using PostgreSQL dump/restore.
-  """
+```rust
+// src/priority_scheduler.rs
 
-  defstruct [:primary, :replicas, :write_log]
+use std::collections::BinaryHeap;
+use std::cmp::Ordering;
 
-  def start_link(opts) do
-    replica_count = Keyword.get(opts, :replicas, 3)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryPriority {
+    /// System queries (health checks, pg_stat, etc.)
+    System = 3,
+    /// Interactive queries from users
+    Interactive = 2,
+    /// Background/batch queries
+    Background = 1,
+}
 
-    # Start primary
-    {:ok, primary} = Pglite.start_link(Keyword.merge(opts, [tcp_port: allocate_port()]))
+pub struct PrioritizedQuery {
+    pub priority: QueryPriority,
+    pub timestamp: std::time::Instant,
+    pub connection_id: u64,
+    pub wire_message: Vec<u8>,
+    pub response_tx: oneshot::Sender<Vec<u8>>,
+}
 
-    # Start replicas (initially clones of primary)
-    replicas = for i <- 1..replica_count do
-      {:ok, replica} = Pglite.start_link(Keyword.merge(opts, [tcp_port: allocate_port()]))
-      replica
-    end
+impl Ord for PrioritizedQuery {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Higher priority first, then earlier timestamp
+        match (self.priority as u8).cmp(&(other.priority as u8)) {
+            Ordering::Equal => other.timestamp.cmp(&self.timestamp),  // Earlier is better
+            other => other,
+        }
+    }
+}
 
-    {:ok, %__MODULE__{primary: primary, replicas: replicas, write_log: []}}
-  end
+impl PartialOrd for PrioritizedQuery {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
-  def query(pool, query, params, opts \\ []) do
-    if is_read_query?(query) do
-      # Round-robin to replicas
-      replica = select_replica(pool)
-      {:ok, conn} = Postgrex.start_link(Pglite.get_connection_opts(replica))
-      result = Postgrex.query(conn, query, params, opts)
-      GenServer.stop(conn)
-      result
-    else
-      # Write to primary
-      {:ok, conn} = Postgrex.start_link(Pglite.get_connection_opts(pool.primary))
-      result = Postgrex.query(conn, query, params, opts)
-      GenServer.stop(conn)
+pub struct PriorityScheduler {
+    runtime: Arc<PgliteRuntime>,
+    queue: Mutex<BinaryHeap<PrioritizedQuery>>,
 
-      # Asynchronously propagate to replicas
-      propagate_to_replicas(pool, query, params)
+    /// Fair scheduling: track last execution time per connection
+    last_execution: Mutex<HashMap<u64, std::time::Instant>>,
 
-      result
-    end
-  end
+    /// Maximum queries per connection in a scheduling window
+    max_queries_per_window: u32,
+    window_duration: std::time::Duration,
+}
 
-  defp is_read_query?(query) do
-    normalized = String.downcase(String.trim(query))
-    String.starts_with?(normalized, "select") or
-    String.starts_with?(normalized, "with")  # CTEs that are read-only
-  end
-end
+impl PriorityScheduler {
+    /// Detect query priority based on content
+    pub fn detect_priority(wire_message: &[u8]) -> QueryPriority {
+        // Parse query to determine priority
+        if let Some(query) = Self::extract_query_text(wire_message) {
+            let upper = query.to_uppercase();
+
+            // System queries
+            if upper.contains("PG_STAT")
+                || upper.contains("PG_CATALOG")
+                || upper.starts_with("SELECT 1")  // Health check
+                || upper.contains("PG_IS_IN_RECOVERY") {
+                return QueryPriority::System;
+            }
+
+            // Background queries (typically large scans, VACUUM, etc.)
+            if upper.starts_with("VACUUM")
+                || upper.starts_with("ANALYZE")
+                || upper.starts_with("REINDEX")
+                || upper.contains("COPY") {
+                return QueryPriority::Background;
+            }
+        }
+
+        QueryPriority::Interactive
+    }
+}
 ```
 
 ---
 
-### Solution 5: Connection Coalescing (Batching)
+### Solution 5: Connection Coalescing / Batching
 
-Batch multiple queries from different connections into single larger operations:
+Batch multiple queries into a single execution for efficiency.
 
-```elixir
-defmodule Pglite.QueryBatcher do
-  @moduledoc """
-  Collects queries for a short window and executes them together.
-  Works well for simple queries but not for transactions.
-  """
+```rust
+// src/query_batcher.rs
 
-  @batch_window_ms 5
-  @max_batch_size 50
+use std::time::Duration;
 
-  def start_link(pglite) do
-    GenServer.start_link(__MODULE__, pglite)
-  end
+pub struct QueryBatcher {
+    runtime: Arc<PgliteRuntime>,
+    batch_window: Duration,
+    max_batch_size: usize,
+    pending: Mutex<Vec<BatchedQuery>>,
+}
 
-  def query(batcher, query, params) do
-    GenServer.call(batcher, {:query, query, params}, :infinity)
-  end
+struct BatchedQuery {
+    connection_id: u64,
+    wire_message: Vec<u8>,
+    response_tx: oneshot::Sender<Vec<u8>>,
+    received_at: std::time::Instant,
+}
 
-  @impl true
-  def handle_call({:query, query, params}, from, state) do
-    new_batch = [{from, query, params} | state.current_batch]
+impl QueryBatcher {
+    pub fn new(runtime: Arc<PgliteRuntime>, batch_window_ms: u64, max_batch_size: usize) -> Self {
+        Self {
+            runtime,
+            batch_window: Duration::from_millis(batch_window_ms),
+            max_batch_size,
+            pending: Mutex::new(Vec::new()),
+        }
+    }
 
-    if length(new_batch) >= @max_batch_size do
-      execute_batch(new_batch, state.conn)
-      {:noreply, %{state | current_batch: []}}
-    else
-      # Schedule batch execution after window
-      if state.batch_timer == nil do
-        timer = Process.send_after(self(), :execute_batch, @batch_window_ms)
-        {:noreply, %{state | current_batch: new_batch, batch_timer: timer}}
-      else
-        {:noreply, %{state | current_batch: new_batch}}
-      end
-    end
-  end
+    /// Add a query to the batch
+    pub fn submit(&self, conn_id: u64, wire_message: Vec<u8>, response_tx: oneshot::Sender<Vec<u8>>) {
+        let mut pending = self.pending.lock().unwrap();
+        pending.push(BatchedQuery {
+            connection_id: conn_id,
+            wire_message,
+            response_tx,
+            received_at: std::time::Instant::now(),
+        });
 
-  @impl true
-  def handle_info(:execute_batch, state) do
-    execute_batch(state.current_batch, state.conn)
-    {:noreply, %{state | current_batch: [], batch_timer: nil}}
-  end
+        // Execute immediately if batch is full
+        if pending.len() >= self.max_batch_size {
+            drop(pending);
+            self.execute_batch();
+        }
+    }
 
-  defp execute_batch(batch, conn) do
-    # For simple SELECTs, could use UNION ALL
-    # For mixed queries, execute sequentially
-    Enum.each(batch, fn {from, query, params} ->
-      result = Postgrex.query(conn, query, params)
-      GenServer.reply(from, result)
-    end)
-  end
-end
+    /// Execute pending batch (called by timer or when full)
+    pub fn execute_batch(&self) {
+        let queries: Vec<_> = {
+            let mut pending = self.pending.lock().unwrap();
+            std::mem::take(&mut *pending)
+        };
+
+        if queries.is_empty() {
+            return;
+        }
+
+        // For simple SELECT queries, we could potentially use UNION ALL
+        // But for safety, execute sequentially
+        for query in queries {
+            let response = self.runtime.process_wire_message(&query.wire_message)
+                .unwrap_or_else(|e| create_error_response(&e.to_string()));
+            let _ = query.response_tx.send(response);
+        }
+    }
+
+    /// Spawn background task to flush batches periodically
+    pub fn spawn_flush_task(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(self.batch_window);
+            loop {
+                interval.tick().await;
+                self.execute_batch();
+            }
+        });
+    }
+}
 ```
 
 ---
 
 ## Comparison Matrix
 
-| Solution | Complexity | Performance | Transaction Support | Session State | Ecto Compatible |
-|----------|------------|-------------|---------------------|---------------|-----------------|
-| 1A. Rust Multiplexer | High | Best | Full | Full | Yes |
-| 1B. Elixir Multiplexer | Medium | Good | Basic | Limited | Partial |
-| 2. Transaction-Aware | High | Good | Full | Limited | Partial |
-| 3. Virtual Sessions | Very High | Good | Full | Full | Yes |
-| 4. Read Replicas | Medium | Best for reads | Limited | Per-instance | Yes |
-| 5. Query Batching | Low | Moderate | None | None | No |
+| Solution | Complexity | Latency | Transaction Support | Session Isolation | Language Agnostic |
+|----------|------------|---------|---------------------|-------------------|-------------------|
+| 1. Async Queue | Low | Low | None | None | ✅ Yes |
+| 2. Transaction Scheduler | Medium | Low | Full | Partial | ✅ Yes |
+| 3. Virtual Sessions | High | Medium | Full | Full | ✅ Yes |
+| 4. Priority Queue | Medium | Variable | None | None | ✅ Yes |
+| 5. Query Batching | Low | Higher | None | None | ✅ Yes |
 
 ---
 
 ## Recommended Implementation Path
 
-### Phase 1: Basic Elixir-Level Queue (Quick Win)
+### Phase 1: Async Query Queue (Foundation)
 
-Implement a simple GenServer that serializes queries:
+1. Add `tokio` to dependencies
+2. Implement basic `ConnectionMultiplexer` (Solution 1)
+3. Replace thread-per-connection with async tasks
+4. Add MPSC queue for query serialization
 
-```elixir
-defmodule Pglite.Pool do
-  @moduledoc """
-  A simple connection pool that accepts multiple clients but serializes
-  all queries through a single PGLite connection.
-  """
+**Files to modify:**
+- `Cargo.toml` - add tokio
+- `src/lib.rs` - add new module
+- `src/main.rs` - switch to async runtime
+- `src/multiplexer.rs` - new file
 
-  use GenServer
+### Phase 2: Transaction Awareness
 
-  defstruct [:pglite, :conn, :queue, :busy]
+1. Add query type detection (BEGIN/COMMIT/ROLLBACK parsing)
+2. Implement transaction locking
+3. Add connection state tracking
+4. Implement waiter queue for transactions
 
-  def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts, name: opts[:name])
-  end
+**New files:**
+- `src/transaction_scheduler.rs`
+- `src/wire_parser.rs` (extract query text from wire protocol)
 
-  def query(pool, query, params \\ [], opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, 15_000)
-    GenServer.call(pool, {:query, query, params}, timeout)
-  end
+### Phase 3: Virtual Sessions (Optional, for full compatibility)
 
-  def transaction(pool, fun, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, 15_000)
-    GenServer.call(pool, {:transaction, fun}, timeout)
-  end
+1. Implement session state struct
+2. Add SET command interception
+3. Implement session context switching
+4. Add prepared statement tracking
 
-  @impl true
-  def init(opts) do
-    {:ok, pglite} = Pglite.start_link(opts)
-    conn_opts = Pglite.get_connection_opts(pglite)
-    {:ok, conn} = Postgrex.start_link(conn_opts)
-
-    {:ok, %__MODULE__{
-      pglite: pglite,
-      conn: conn,
-      queue: :queue.new(),
-      busy: false
-    }}
-  end
-
-  @impl true
-  def handle_call({:query, query, params}, from, state) do
-    handle_request({:query, query, params}, from, state)
-  end
-
-  def handle_call({:transaction, fun}, from, state) do
-    handle_request({:transaction, fun}, from, state)
-  end
-
-  defp handle_request(request, from, %{busy: false} = state) do
-    execute_and_reply(request, from, state)
-  end
-
-  defp handle_request(request, from, %{busy: true} = state) do
-    new_queue = :queue.in({request, from}, state.queue)
-    {:noreply, %{state | queue: new_queue}}
-  end
-
-  defp execute_and_reply({:query, query, params}, from, state) do
-    result = Postgrex.query(state.conn, query, params)
-    GenServer.reply(from, result)
-    process_next(%{state | busy: false})
-  end
-
-  defp execute_and_reply({:transaction, fun}, from, state) do
-    result = Postgrex.transaction(state.conn, fn conn -> fun.(conn) end)
-    GenServer.reply(from, result)
-    process_next(%{state | busy: false})
-  end
-
-  defp process_next(state) do
-    case :queue.out(state.queue) do
-      {:empty, _} ->
-        {:noreply, state}
-
-      {{:value, {request, from}}, rest} ->
-        execute_and_reply(request, from, %{state | queue: rest, busy: true})
-    end
-  end
-end
-```
-
-### Phase 2: Rust-Level Optimization
-
-Move the queuing logic into Rust for better performance:
-
-1. Use async Rust with tokio for efficient I/O
-2. Implement connection state tracking
-3. Add transaction-aware scheduling
-
-### Phase 3: Full Virtual Session Support
-
-Implement complete PostgreSQL session emulation for full compatibility.
+**New files:**
+- `src/virtual_session.rs`
+- `src/session_manager.rs`
 
 ---
 
-## Alternative Approaches Worth Considering
+## Configuration Options
 
-### 1. Snapshot/Restore Pattern for Testing
+Add these to `PgliteConfig`:
 
-For testing scenarios, pre-create database snapshots and restore them:
+```rust
+pub struct PgliteConfig {
+    // ... existing fields ...
 
-```elixir
-defmodule Pglite.TestPool do
-  def setup_test_database(pglite) do
-    # Run migrations once
-    run_migrations(pglite)
+    /// Enable connection multiplexing (default: true)
+    pub enable_multiplexing: bool,
 
-    # Create snapshot
-    snapshot = create_snapshot(pglite)
+    /// Maximum queued queries (default: 1000)
+    pub max_queue_size: usize,
 
-    # For each test, restore from snapshot
-    snapshot
-  end
+    /// Query timeout in milliseconds (default: 30000)
+    pub query_timeout_ms: u64,
 
-  def with_fresh_database(snapshot, fun) do
-    {:ok, pglite} = Pglite.start_link_from_snapshot(snapshot)
-    try do
-      fun.(pglite)
-    after
-      GenServer.stop(pglite)
-    end
-  end
-end
-```
+    /// Enable transaction-aware scheduling (default: true)
+    pub transaction_aware: bool,
 
-### 2. External Connection Pooler (PgBouncer-lite)
+    /// Enable virtual session support (default: false)
+    pub virtual_sessions: bool,
 
-Build a lightweight PgBouncer-like proxy in Elixir:
-
-```elixir
-defmodule Pglite.Bouncer do
-  @moduledoc """
-  A lightweight PgBouncer-style proxy that implements transaction pooling
-  over a single PGLite backend connection.
-  """
-
-  # Pooling modes
-  @session_pooling :session
-  @transaction_pooling :transaction  # Recommended
-  @statement_pooling :statement
-
-  # ...
-end
-```
-
-### 3. Distributed Instance Pool
-
-For maximum parallelism, run multiple PGLite instances and distribute queries:
-
-```elixir
-defmodule Pglite.DistributedPool do
-  def start_link(opts) do
-    pool_size = Keyword.get(opts, :pool_size, System.schedulers_online())
-
-    instances = for i <- 1..pool_size do
-      port = allocate_port()
-      {:ok, pglite} = Pglite.start_link(tcp_port: port)
-      {:ok, conn} = Postgrex.start_link(Pglite.get_connection_opts(pglite))
-      {pglite, conn}
-    end
-
-    # Use a process pool to distribute queries
-    # Each query goes to a random or least-busy instance
-  end
-end
+    /// Query batch window in milliseconds (0 = disabled)
+    pub batch_window_ms: u64,
+}
 ```
 
 ---
 
-## Conclusion
+## Wire Protocol Considerations
 
-The **recommended approach** for ex_pglite is:
+### Detecting Query Type
 
-1. **Start with Solution 1B (Elixir-Level Multiplexer)** - Quick to implement, solves the immediate need
-2. **Add Transaction-Awareness (Solution 2)** - Handle transaction boundaries properly
-3. **Optimize with Rust (Solution 1A)** - If performance becomes critical
+The PostgreSQL wire protocol uses these message types:
 
-For testing use cases where isolation matters more than concurrency, consider **Solution 4 (Read Replicas)** or the **Snapshot/Restore Pattern**.
+| Message | Type Byte | Description |
+|---------|-----------|-------------|
+| Query | `Q` | Simple query (contains SQL text) |
+| Parse | `P` | Prepare statement |
+| Bind | `B` | Bind parameters |
+| Execute | `E` | Execute prepared statement |
+| Sync | `S` | Sync point |
+| Terminate | `X` | Close connection |
+
+For transaction detection, we need to:
+
+1. Parse `Q` messages to find BEGIN/COMMIT/ROLLBACK
+2. Track prepared statement names from `P` messages
+3. Watch for `Parse` with transaction-starting SQL
+
+```rust
+/// Parse a Simple Query message to extract SQL text
+fn extract_simple_query(wire_message: &[u8]) -> Option<&str> {
+    if wire_message.is_empty() || wire_message[0] != b'Q' {
+        return None;
+    }
+    if wire_message.len() < 6 {
+        return None;
+    }
+
+    // Skip type (1 byte) + length (4 bytes)
+    let query_bytes = &wire_message[5..];
+
+    // Find null terminator
+    let end = query_bytes.iter().position(|&b| b == 0)?;
+
+    std::str::from_utf8(&query_bytes[..end]).ok()
+}
+```
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_query_queue_ordering() {
+        // Verify FIFO ordering of queries
+    }
+
+    #[tokio::test]
+    async fn test_transaction_locking() {
+        // Verify only one transaction at a time
+    }
+
+    #[tokio::test]
+    async fn test_session_isolation() {
+        // Verify SET commands don't leak between sessions
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_connections() {
+        // Stress test with many concurrent connections
+    }
+}
+```
+
+### Integration Tests (Elixir)
+
+```elixir
+defmodule Pglite.MultiplexerTest do
+  use ExUnit.Case
+
+  test "multiple connections can query concurrently" do
+    {:ok, pglite} = Pglite.start_link()
+
+    # Start 10 concurrent connections
+    tasks = for i <- 1..10 do
+      Task.async(fn ->
+        {:ok, conn} = Postgrex.start_link(Pglite.get_connection_opts(pglite))
+        {:ok, result} = Postgrex.query(conn, "SELECT $1::int", [i])
+        GenServer.stop(conn)
+        result.rows
+      end)
+    end
+
+    results = Task.await_many(tasks, 30_000)
+    assert length(results) == 10
+  end
+
+  test "transactions are properly isolated" do
+    {:ok, pglite} = Pglite.start_link()
+
+    # Connection 1 starts a transaction
+    {:ok, conn1} = Postgrex.start_link(Pglite.get_connection_opts(pglite))
+    Postgrex.query!(conn1, "BEGIN", [])
+    Postgrex.query!(conn1, "CREATE TABLE test (id int)", [])
+
+    # Connection 2 should not see the table (or wait for transaction)
+    {:ok, conn2} = Postgrex.start_link(Pglite.get_connection_opts(pglite))
+    result = Postgrex.query(conn2, "SELECT * FROM test", [])
+
+    # Depending on implementation:
+    # - With transaction scheduling: conn2 waits
+    # - Without: conn2 sees error (table doesn't exist yet)
+
+    Postgrex.query!(conn1, "COMMIT", [])
+
+    # Now conn2 should see the table
+    {:ok, _} = Postgrex.query(conn2, "SELECT * FROM test", [])
+  end
+end
+```
+
+---
 
 ## References
 
 - [PGlite Socket Documentation](https://pglite.dev/docs/pglite-socket)
 - [PGlite Multi-Tab Worker](https://pglite.dev/docs/multi-tab-worker)
-- [PgBouncer Connection Pooling](https://pgdash.io/blog/pgbouncer-connection-pool.html)
-- [DBConnection Pooling Deep Dive](https://jumpwire.io/blog/dbconnection-pooling-deep-dive)
-- [Elixir GenServer Documentation](https://hexdocs.pm/elixir/GenServer.html)
-- [PGlite Issue #324: Support for concurrent databases](https://github.com/electric-sql/pglite/issues/324)
-- [PGlite Issue #652: Browser connection limit](https://github.com/electric-sql/pglite/issues/652)
+- [PostgreSQL Wire Protocol](https://www.postgresql.org/docs/current/protocol.html)
+- [Tokio Async Runtime](https://tokio.rs/)
+- [PgBouncer Transaction Pooling](https://www.pgbouncer.org/features.html)
+- [PGlite Issue #324: Concurrent databases](https://github.com/electric-sql/pglite/issues/324)
