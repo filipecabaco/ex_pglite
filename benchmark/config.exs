@@ -14,7 +14,8 @@ defmodule Benchmark.Config do
     :output_file,
     :operations,
     :cooldown_seconds,
-    :startup_timeout_seconds
+    :startup_timeout_seconds,
+    :pool_size
   ]
 
   @intensity_profiles %{
@@ -85,7 +86,8 @@ defmodule Benchmark.Config do
       output_file: Keyword.get(opts, :output_file, nil),
       operations: Keyword.get(opts, :operations, [:read, :write, :transaction]),
       cooldown_seconds: Keyword.get(opts, :cooldown_seconds, 0),
-      startup_timeout_seconds: Keyword.get(opts, :startup_timeout_seconds, default_startup_timeout)
+      startup_timeout_seconds: Keyword.get(opts, :startup_timeout_seconds, default_startup_timeout),
+      pool_size: Keyword.get(opts, :pool_size, 10)
     }
   end
 
@@ -109,7 +111,8 @@ defmodule Benchmark.Config do
           sample_interval: :integer,
           output: :string,
           cooldown: :integer,
-          startup_timeout: :integer
+          startup_timeout: :integer,
+          pool_size: :integer
         ],
         aliases: [
           i: :instances,
@@ -120,7 +123,8 @@ defmodule Benchmark.Config do
           n: :intensity,
           o: :output,
           c: :cooldown,
-          t: :startup_timeout
+          t: :startup_timeout,
+          P: :pool_size
         ]
       )
 
@@ -137,7 +141,8 @@ defmodule Benchmark.Config do
       sample_interval_ms: Keyword.get(opts, :sample_interval, 1000),
       output_file: Keyword.get(opts, :output),
       cooldown_seconds: Keyword.get(opts, :cooldown, 0),
-      startup_timeout_seconds: Keyword.get(opts, :startup_timeout, default_startup_timeout)
+      startup_timeout_seconds: Keyword.get(opts, :startup_timeout, default_startup_timeout),
+      pool_size: Keyword.get(opts, :pool_size, 10)
     )
   end
 
