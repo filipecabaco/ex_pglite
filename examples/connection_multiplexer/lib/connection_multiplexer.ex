@@ -116,7 +116,7 @@ defmodule ConnectionMultiplexer do
 
     start_time = System.monotonic_time(:millisecond)
 
-    results = Task.await_many(tasks, 10_000)
+    _results = Task.await_many(tasks, 10_000)
 
     elapsed = System.monotonic_time(:millisecond) - start_time
 

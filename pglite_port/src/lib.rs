@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -6,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use wasmtime::{Config, Engine, Linker, Memory, Module, Store, Val};
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
+
+static CONNECTION_SERIALIZER: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 struct WireMessage<'a> {
     msg_type: u8,
@@ -640,27 +643,60 @@ fn ensure_server_version(
     }
 }
 
+fn response_has_ready_for_query(response: &[u8]) -> bool {
+    WireMessageIter::new(response).any(|msg| msg.msg_type == b'Z')
+}
+
+fn message_starts_transaction(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    matches!(data[0], b'P' | b'Q' | b'B' | b'E' | b'D' | b'C' | b'H' | b'F')
+}
+
 pub fn handle_connection(mut stream: TcpStream, runtime: Arc<PgliteRuntime>) -> Result<()> {
+    use std::sync::MutexGuard;
+    use std::time::Duration;
+
     stream.set_nodelay(true)?;
     let mut buf = vec![0u8; 64 * 1024];
     let mut has_sent_server_version = false;
+    let mut held_lock: Option<MutexGuard<'_, ()>> = None;
 
     loop {
+        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                let needs_lock = held_lock.is_none()
+                    && (message_starts_transaction(&buf[..n]) || !has_sent_server_version);
+
+                if needs_lock {
+                    held_lock = Some(CONNECTION_SERIALIZER.lock().unwrap());
+                }
+
                 match runtime.process_wire_message(&buf[..n]) {
                     Ok(response) if !response.is_empty() => {
                         let response =
                             ensure_server_version(response, &mut has_sent_server_version);
                         stream.write_all(&response)?;
                         stream.flush()?;
+
+                        if response_has_ready_for_query(&response) {
+                            held_lock = None;
+                        }
                     }
                     Ok(_) => {}
                     Err(_) => break,
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
             Err(e) => return Err(e).context("Failed to read from client"),
         }
     }

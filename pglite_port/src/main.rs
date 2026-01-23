@@ -67,8 +67,8 @@ fn main() -> Result<()> {
     setup_signal_handlers();
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 5 || args.len() > 6 {
-        eprintln!("Usage: {} <data_dir> <tcp_port> <wasm_path> <prefix_dir> [pgdata_seed_path]", args[0]);
+    if args.len() < 5 {
+        eprintln!("Usage: {} <data_dir> <tcp_port> <wasm_path> <prefix_dir> [pgdata_seed_path] [--multiplexer <mode>]", args[0]);
         eprintln!();
         eprintln!("Arguments:");
         eprintln!("  data_dir         - Directory for PostgreSQL data");
@@ -76,6 +76,9 @@ fn main() -> Result<()> {
         eprintln!("  wasm_path        - Path to pglite.wasi binary");
         eprintln!("  prefix_dir       - Directory containing pglite prefix files");
         eprintln!("  pgdata_seed_path - Optional: pre-initialized PGDATA tarball (faster startup)");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --multiplexer <mode>  - Enable connection multiplexer (mode: queue)");
         std::process::exit(1);
     }
 
@@ -85,7 +88,28 @@ fn main() -> Result<()> {
         .context("tcp_port must be a valid port number (1-65535)")?;
     let wasm_path = PathBuf::from(&args[3]);
     let prefix_dir = PathBuf::from(&args[4]);
-    let pgdata_seed_path = args.get(5).map(PathBuf::from);
+
+    let mut pgdata_seed_path: Option<PathBuf> = None;
+    let mut multiplexer_mode: Option<String> = None;
+
+    let mut i = 5;
+    while i < args.len() {
+        if args[i] == "--multiplexer" {
+            if i + 1 < args.len() {
+                multiplexer_mode = Some(args[i + 1].clone());
+                i += 2;
+            } else {
+                eprintln!("Error: --multiplexer requires a mode argument (e.g., queue)");
+                std::process::exit(1);
+            }
+        } else if pgdata_seed_path.is_none() && !args[i].starts_with("--") {
+            pgdata_seed_path = Some(PathBuf::from(&args[i]));
+            i += 1;
+        } else {
+            eprintln!("Unknown argument: {}", args[i]);
+            std::process::exit(1);
+        }
+    }
 
     debug_log!("=== PGlite Wasmtime Port ===");
     debug_log!("Data Directory: {:?}", data_dir);
@@ -94,6 +118,9 @@ fn main() -> Result<()> {
     debug_log!("Prefix Directory: {:?}", prefix_dir);
     if let Some(ref sp) = pgdata_seed_path {
         debug_log!("PGDATA Seed: {:?}", sp);
+    }
+    if let Some(ref mode) = multiplexer_mode {
+        debug_log!("Multiplexer Mode: {}", mode);
     }
     debug_log!("Process ID: {}", std::process::id());
 
@@ -161,10 +188,12 @@ fn main() -> Result<()> {
     };
 
     debug_log!("\n=== Step 4: Ready ===");
-    println!(
-        "{}",
+    let ready_json = if let Some(ref mode) = multiplexer_mode {
+        json!({"id": "ready", "success": true, "port": tcp_port, "multiplexer": mode})
+    } else {
         json!({"id": "ready", "success": true, "port": tcp_port})
-    );
+    };
+    println!("{}", ready_json);
     debug_log!("✓ Ready signal sent to Elixir");
 
     let runtime = Arc::new(runtime);

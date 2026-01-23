@@ -228,7 +228,7 @@ defmodule Pglite do
         :binary,
         :exit_status,
         {:line, 1024},
-        {:stderr_to_stdout}
+        :stderr_to_stdout
       ])
 
     case wait_for_ready(port, state.startup_timeout) do
