@@ -1,18 +1,19 @@
-/// PGlite Port - Wasmtime-based PostgreSQL runtime
-///
-/// Usage: pglite_port <data_dir> <tcp_port> <wasm_path> <prefix_dir> [pgdata_seed_path]
-///
-/// Arguments:
-///   data_dir         - Directory for PostgreSQL data (will be created if missing)
-///   tcp_port         - TCP port to listen on for PostgreSQL connections
-///   wasm_path        - Path to the pglite.wasi binary
-///   prefix_dir       - Directory containing pglite prefix files (share/postgresql/)
-///   pgdata_seed_path - Optional: Path to pre-initialized PGDATA tarball (pgdata_seed.tar.zst)
-///
-/// Environment:
-///   PGLITE_DEBUG=1   - Enable verbose debug output
+//! PGlite Port - Wasmtime-based PostgreSQL runtime
+//!
+//! Usage: pglite_port <data_dir> <tcp_port> <wasm_path> <prefix_dir> [pgdata_seed_path]
+//!
+//! Arguments:
+//!   data_dir         - Directory for PostgreSQL data (will be created if missing)
+//!   tcp_port         - TCP port to listen on for PostgreSQL connections
+//!   wasm_path        - Path to the pglite.wasi binary
+//!   prefix_dir       - Directory containing pglite prefix files (share/postgresql/)
+//!   pgdata_seed_path - Optional: Path to pre-initialized PGDATA tarball (pgdata_seed.tar.zst)
+//!
+//! Environment:
+//!   PGLITE_DEBUG=1   - Enable verbose debug output
 
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
 use pglite_port::{bind_tcp_socket, handle_connection, PgliteConfig, PgliteRuntime};
 use serde_json::json;
 use std::env;
@@ -23,16 +24,100 @@ use std::time::Duration;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-fn is_debug() -> bool {
-    env::var("PGLITE_DEBUG").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
-}
+static DEBUG_ENABLED: Lazy<bool> = Lazy::new(|| {
+    env::var("PGLITE_DEBUG")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+});
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {
-        if is_debug() {
+        if *DEBUG_ENABLED {
             eprintln!($($arg)*);
         }
     };
+}
+
+struct ParsedArgs {
+    data_dir: PathBuf,
+    tcp_port: u16,
+    wasm_path: PathBuf,
+    prefix_dir: PathBuf,
+    pgdata_seed_path: Option<PathBuf>,
+    multiplexer_mode: Option<String>,
+}
+
+impl ParsedArgs {
+    fn parse() -> Result<Self> {
+        let args: Vec<String> = env::args().collect();
+
+        if args.len() < 5 {
+            Self::print_usage(&args[0]);
+            std::process::exit(1);
+        }
+
+        let data_dir = PathBuf::from(&args[1]);
+        let tcp_port: u16 = args[2]
+            .parse()
+            .context("tcp_port must be a valid port number (1-65535)")?;
+        let wasm_path = PathBuf::from(&args[3]);
+        let prefix_dir = PathBuf::from(&args[4]);
+
+        let mut pgdata_seed_path: Option<PathBuf> = None;
+        let mut multiplexer_mode: Option<String> = None;
+
+        let mut i = 5;
+        while i < args.len() {
+            if args[i] == "--multiplexer" {
+                if i + 1 < args.len() {
+                    multiplexer_mode = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("Error: --multiplexer requires a mode argument (e.g., queue)");
+                    std::process::exit(1);
+                }
+            } else if pgdata_seed_path.is_none() && !args[i].starts_with("--") {
+                pgdata_seed_path = Some(PathBuf::from(&args[i]));
+                i += 1;
+            } else {
+                eprintln!("Unknown argument: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+
+        Ok(Self {
+            data_dir,
+            tcp_port,
+            wasm_path,
+            prefix_dir,
+            pgdata_seed_path,
+            multiplexer_mode,
+        })
+    }
+
+    fn print_usage(program_name: &str) {
+        eprintln!("Usage: {} <data_dir> <tcp_port> <wasm_path> <prefix_dir> [pgdata_seed_path] [--multiplexer <mode>]", program_name);
+        eprintln!();
+        eprintln!("Arguments:");
+        eprintln!("  data_dir         - Directory for PostgreSQL data");
+        eprintln!("  tcp_port         - TCP port for PostgreSQL connections");
+        eprintln!("  wasm_path        - Path to pglite.wasi binary");
+        eprintln!("  prefix_dir       - Directory containing pglite prefix files");
+        eprintln!("  pgdata_seed_path - Optional: pre-initialized PGDATA tarball (faster startup)");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --multiplexer <mode>  - Enable connection multiplexer (mode: queue)");
+    }
+
+    fn into_config(self) -> PgliteConfig {
+        PgliteConfig {
+            data_dir: self.data_dir,
+            tcp_port: self.tcp_port,
+            wasm_path: self.wasm_path,
+            prefix_dir: self.prefix_dir,
+            pgdata_seed_path: self.pgdata_seed_path,
+        }
+    }
 }
 
 fn setup_signal_handlers() {
@@ -65,72 +150,26 @@ fn setup_signal_handlers() {
 
 fn main() -> Result<()> {
     setup_signal_handlers();
-    let args: Vec<String> = env::args().collect();
 
-    if args.len() < 5 {
-        eprintln!("Usage: {} <data_dir> <tcp_port> <wasm_path> <prefix_dir> [pgdata_seed_path] [--multiplexer <mode>]", args[0]);
-        eprintln!();
-        eprintln!("Arguments:");
-        eprintln!("  data_dir         - Directory for PostgreSQL data");
-        eprintln!("  tcp_port         - TCP port for PostgreSQL connections");
-        eprintln!("  wasm_path        - Path to pglite.wasi binary");
-        eprintln!("  prefix_dir       - Directory containing pglite prefix files");
-        eprintln!("  pgdata_seed_path - Optional: pre-initialized PGDATA tarball (faster startup)");
-        eprintln!();
-        eprintln!("Options:");
-        eprintln!("  --multiplexer <mode>  - Enable connection multiplexer (mode: queue)");
-        std::process::exit(1);
-    }
-
-    let data_dir = PathBuf::from(&args[1]);
-    let tcp_port: u16 = args[2]
-        .parse()
-        .context("tcp_port must be a valid port number (1-65535)")?;
-    let wasm_path = PathBuf::from(&args[3]);
-    let prefix_dir = PathBuf::from(&args[4]);
-
-    let mut pgdata_seed_path: Option<PathBuf> = None;
-    let mut multiplexer_mode: Option<String> = None;
-
-    let mut i = 5;
-    while i < args.len() {
-        if args[i] == "--multiplexer" {
-            if i + 1 < args.len() {
-                multiplexer_mode = Some(args[i + 1].clone());
-                i += 2;
-            } else {
-                eprintln!("Error: --multiplexer requires a mode argument (e.g., queue)");
-                std::process::exit(1);
-            }
-        } else if pgdata_seed_path.is_none() && !args[i].starts_with("--") {
-            pgdata_seed_path = Some(PathBuf::from(&args[i]));
-            i += 1;
-        } else {
-            eprintln!("Unknown argument: {}", args[i]);
-            std::process::exit(1);
-        }
-    }
+    let parsed_args = ParsedArgs::parse()?;
 
     debug_log!("=== PGlite Wasmtime Port ===");
-    debug_log!("Data Directory: {:?}", data_dir);
-    debug_log!("TCP Port: {}", tcp_port);
-    debug_log!("WASM Path: {:?}", wasm_path);
-    debug_log!("Prefix Directory: {:?}", prefix_dir);
-    if let Some(ref sp) = pgdata_seed_path {
+    debug_log!("Data Directory: {:?}", parsed_args.data_dir);
+    debug_log!("TCP Port: {}", parsed_args.tcp_port);
+    debug_log!("WASM Path: {:?}", parsed_args.wasm_path);
+    debug_log!("Prefix Directory: {:?}", parsed_args.prefix_dir);
+    if let Some(ref sp) = parsed_args.pgdata_seed_path {
         debug_log!("PGDATA Seed: {:?}", sp);
     }
-    if let Some(ref mode) = multiplexer_mode {
+    if let Some(ref mode) = parsed_args.multiplexer_mode {
         debug_log!("Multiplexer Mode: {}", mode);
     }
     debug_log!("Process ID: {}", std::process::id());
 
-    let config = PgliteConfig {
-        data_dir,
-        tcp_port,
-        wasm_path,
-        prefix_dir,
-        pgdata_seed_path: pgdata_seed_path.clone(),
-    };
+    let tcp_port = parsed_args.tcp_port;
+    let has_pgdata_seed = parsed_args.pgdata_seed_path.is_some();
+    let multiplexer_mode = parsed_args.multiplexer_mode.clone();
+    let config = parsed_args.into_config();
 
     debug_log!("\n=== Step 1: Creating Runtime ===");
     let mut runtime = match PgliteRuntime::new(config) {
@@ -150,7 +189,7 @@ fn main() -> Result<()> {
     };
 
     debug_log!("\n=== Step 2: Initializing PostgreSQL ===");
-    if pgdata_seed_path.is_some() {
+    if has_pgdata_seed {
         debug_log!("  Using PGDATA seed (skipping initdb)");
     } else {
         debug_log!("  No PGDATA seed, running initdb...");

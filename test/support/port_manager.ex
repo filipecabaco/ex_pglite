@@ -7,7 +7,7 @@ defmodule Pglite.Test.PortManager do
   """
 
   @table :pglite_test_ports
-  @port_range 50000..59999
+  @port_range 50_000..59_999
 
   def start do
     if :ets.whereis(@table) == :undefined do

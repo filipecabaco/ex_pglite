@@ -10,6 +10,8 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 static CONNECTION_SERIALIZER: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+const MAX_RESPONSE_POLL_ITERATIONS: u8 = 11;
+
 struct WireMessage<'a> {
     msg_type: u8,
     payload: &'a [u8],
@@ -54,60 +56,66 @@ impl<'a> Iterator for WireMessageIter<'a> {
     }
 }
 
-const ERROR_PATTERNS: &[(&[&str], &str, &str)] = &[
+struct ErrorPattern {
+    function_patterns: &'static [&'static str],
+    sql_code: &'static str,
+    message: &'static str,
+}
+
+const ERROR_PATTERNS: &[ErrorPattern] = &[
     // Class 42 - Syntax Error or Access Rule Violation
-    (&["parserOpenTable", "addRangeTableEntry", "RangeVarGetRelid", "relation_openrv"], "42P01", "relation does not exist"),
-    (&["ParseFuncOrColumn", "LookupFuncName", "LookupFuncWithArgs"], "42883", "function does not exist"),
-    (&["transformColumnRef", "colNameToVar", "errorMissingColumn"], "42703", "column does not exist"),
-    (&["scanner_yyerror", "base_yyerror", "syntax_error"], "42601", "syntax error"),
-    (&["aclcheck", "permission", "pg_aclcheck"], "42501", "permission denied"),
-    (&["LookupTypeName", "typenameType", "TypeNameToString"], "42704", "undefined object"),
-    (&["LookupOperName", "LookupOperWithArgs", "oper_select_candidate"], "42883", "operator does not exist"),
-    (&["errorMissingRTE", "errorConflictingDefElem"], "42P01", "undefined table"),
-    (&["transformExpr", "coerce_type", "coerce_to_target_type"], "42846", "cannot coerce"),
-    (&["RI_FKey_check", "ri_Check_Pk_Match"], "23503", "foreign key violation"),
+    ErrorPattern { function_patterns: &["parserOpenTable", "addRangeTableEntry", "RangeVarGetRelid", "relation_openrv"], sql_code: "42P01", message: "relation does not exist" },
+    ErrorPattern { function_patterns: &["ParseFuncOrColumn", "LookupFuncName", "LookupFuncWithArgs"], sql_code: "42883", message: "function does not exist" },
+    ErrorPattern { function_patterns: &["transformColumnRef", "colNameToVar", "errorMissingColumn"], sql_code: "42703", message: "column does not exist" },
+    ErrorPattern { function_patterns: &["scanner_yyerror", "base_yyerror", "syntax_error"], sql_code: "42601", message: "syntax error" },
+    ErrorPattern { function_patterns: &["aclcheck", "permission", "pg_aclcheck"], sql_code: "42501", message: "permission denied" },
+    ErrorPattern { function_patterns: &["LookupTypeName", "typenameType", "TypeNameToString"], sql_code: "42704", message: "undefined object" },
+    ErrorPattern { function_patterns: &["LookupOperName", "LookupOperWithArgs", "oper_select_candidate"], sql_code: "42883", message: "operator does not exist" },
+    ErrorPattern { function_patterns: &["errorMissingRTE", "errorConflictingDefElem"], sql_code: "42P01", message: "undefined table" },
+    ErrorPattern { function_patterns: &["transformExpr", "coerce_type", "coerce_to_target_type"], sql_code: "42846", message: "cannot coerce" },
+    ErrorPattern { function_patterns: &["RI_FKey_check", "ri_Check_Pk_Match"], sql_code: "23503", message: "foreign key violation" },
 
     // Class 23 - Integrity Constraint Violation
-    (&["ExecConstraints", "_bt_check_unique", "unique_key_recheck"], "23505", "unique constraint violation"),
-    (&["ExecRelCheck", "ExecPartitionCheck", "domain_check_input"], "23514", "check constraint violation"),
-    (&["ExecCheckIndexConstraints", "check_exclusion_constraint"], "23P01", "exclusion constraint violation"),
-    (&["ri_ReportViolation", "RI_FKey_noaction", "RI_FKey_restrict"], "23503", "foreign key violation"),
-    (&["not_null_violation", "ExecConstraints"], "23502", "not null violation"),
-    (&["ExecInsert", "ExecUpdate", "ExecDelete"], "23000", "integrity constraint violation"),
+    ErrorPattern { function_patterns: &["ExecConstraints", "_bt_check_unique", "unique_key_recheck"], sql_code: "23505", message: "unique constraint violation" },
+    ErrorPattern { function_patterns: &["ExecRelCheck", "ExecPartitionCheck", "domain_check_input"], sql_code: "23514", message: "check constraint violation" },
+    ErrorPattern { function_patterns: &["ExecCheckIndexConstraints", "check_exclusion_constraint"], sql_code: "23P01", message: "exclusion constraint violation" },
+    ErrorPattern { function_patterns: &["ri_ReportViolation", "RI_FKey_noaction", "RI_FKey_restrict"], sql_code: "23503", message: "foreign key violation" },
+    ErrorPattern { function_patterns: &["not_null_violation", "ExecConstraints"], sql_code: "23502", message: "not null violation" },
+    ErrorPattern { function_patterns: &["ExecInsert", "ExecUpdate", "ExecDelete"], sql_code: "23000", message: "integrity constraint violation" },
 
     // Class 22 - Data Exception
-    (&["division_by_zero", "int4div", "int8div", "float8div"], "22012", "division by zero"),
-    (&["numeric_overflow", "overflow", "int4mul", "int8mul"], "22003", "numeric value out of range"),
-    (&["DateTimeParseError", "datetime_field_overflow"], "22008", "datetime field overflow"),
-    (&["invalid_text_representation", "pg_strtoint"], "22P02", "invalid text representation"),
-    (&["string_data_right_truncation", "varchar"], "22001", "string data right truncation"),
+    ErrorPattern { function_patterns: &["division_by_zero", "int4div", "int8div", "float8div"], sql_code: "22012", message: "division by zero" },
+    ErrorPattern { function_patterns: &["numeric_overflow", "overflow", "int4mul", "int8mul"], sql_code: "22003", message: "numeric value out of range" },
+    ErrorPattern { function_patterns: &["DateTimeParseError", "datetime_field_overflow"], sql_code: "22008", message: "datetime field overflow" },
+    ErrorPattern { function_patterns: &["invalid_text_representation", "pg_strtoint"], sql_code: "22P02", message: "invalid text representation" },
+    ErrorPattern { function_patterns: &["string_data_right_truncation", "varchar"], sql_code: "22001", message: "string data right truncation" },
 
     // Class 3D - Invalid Catalog Name
-    (&["get_database_oid", "GetDatabasePath"], "3D000", "invalid catalog name"),
+    ErrorPattern { function_patterns: &["get_database_oid", "GetDatabasePath"], sql_code: "3D000", message: "invalid catalog name" },
 
     // Class 3F - Invalid Schema Name
-    (&["LookupNamespace", "get_namespace_oid", "schema"], "3F000", "invalid schema name"),
+    ErrorPattern { function_patterns: &["LookupNamespace", "get_namespace_oid", "schema"], sql_code: "3F000", message: "invalid schema name" },
 
     // Class 40 - Transaction Rollback
-    (&["deadlock_detected", "DeadLockReport", "CheckDeadLock"], "40P01", "deadlock detected"),
-    (&["serialization_failure", "OnConflict"], "40001", "serialization failure"),
+    ErrorPattern { function_patterns: &["deadlock_detected", "DeadLockReport", "CheckDeadLock"], sql_code: "40P01", message: "deadlock detected" },
+    ErrorPattern { function_patterns: &["serialization_failure", "OnConflict"], sql_code: "40001", message: "serialization failure" },
 
     // Class 53 - Insufficient Resources
-    (&["out_of_memory", "MemoryContextAlloc"], "53200", "out of memory"),
-    (&["disk_full", "FileWrite"], "53100", "disk full"),
+    ErrorPattern { function_patterns: &["out_of_memory", "MemoryContextAlloc"], sql_code: "53200", message: "out of memory" },
+    ErrorPattern { function_patterns: &["disk_full", "FileWrite"], sql_code: "53100", message: "disk full" },
 
     // Class 57 - Operator Intervention
-    (&["query_canceled", "cancel"], "57014", "query canceled"),
+    ErrorPattern { function_patterns: &["query_canceled", "cancel"], sql_code: "57014", message: "query canceled" },
 
     // Class 54 - Program Limit Exceeded
-    (&["too_many_columns", "MaxTupleAttributeNumber"], "54011", "too many columns"),
-    (&["statement_too_complex", "expression_too_deep"], "54001", "statement too complex"),
+    ErrorPattern { function_patterns: &["too_many_columns", "MaxTupleAttributeNumber"], sql_code: "54011", message: "too many columns" },
+    ErrorPattern { function_patterns: &["statement_too_complex", "expression_too_deep"], sql_code: "54001", message: "statement too complex" },
 ];
 
 fn detect_error_from_trap(trap_error: &str) -> (&'static str, Option<&'static str>) {
-    for (patterns, code, msg) in ERROR_PATTERNS {
-        if patterns.iter().any(|p| trap_error.contains(p)) {
-            return (code, Some(msg));
+    for pattern in ERROR_PATTERNS {
+        if pattern.function_patterns.iter().any(|p| trap_error.contains(p)) {
+            return (pattern.sql_code, Some(pattern.message));
         }
     }
     ("XX000", None)
@@ -206,6 +214,142 @@ impl SharedModule {
     }
 }
 
+struct WasiSetupResult {
+    wasi_builder: WasiCtxBuilder,
+    memory_tmp_dir: Option<PathBuf>,
+}
+
+fn build_base_wasi_builder() -> WasiCtxBuilder {
+    let mut builder = WasiCtxBuilder::new();
+    builder
+        .inherit_stdio()
+        .env("PGCLIENTENCODING", "UTF8")
+        .env("REPL", "N")
+        .env("LC_CTYPE", "en_US.UTF-8")
+        .env("TZ", "UTC")
+        .env("PGTZ", "UTC")
+        .env("PGDATABASE", "template1")
+        .env("PG_COLOR", "always")
+        .env("PGUSER", "postgres");
+    builder
+}
+
+fn build_memory_mode_wasi(
+    prefix_dir: &Path,
+    pgdata_seed_path: &Option<PathBuf>,
+) -> Result<WasiSetupResult> {
+    let unique_id = std::process::id();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let isolated_tmp = std::env::temp_dir().join(format!("pglite_mem_{}_{}", unique_id, timestamp));
+
+    std::fs::create_dir_all(&isolated_tmp)?;
+
+    let source_pglite = prefix_dir.join("tmp/pglite");
+    let dest_pglite = isolated_tmp.join("pglite");
+    std::fs::create_dir_all(&dest_pglite)?;
+
+    let source_share = source_pglite.join("share");
+    let dest_share = dest_pglite.join("share");
+    if source_share.exists() {
+        copy_dir_recursive(&source_share, &dest_share)?;
+    }
+
+    for entry in std::fs::read_dir(&source_pglite)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str != "share" && name_str != "base" {
+            let src_path = entry.path();
+            let dst_path = dest_pglite.join(&name);
+            if src_path.is_dir() {
+                copy_dir_recursive(&src_path, &dst_path)?;
+            } else {
+                std::fs::copy(&src_path, &dst_path)?;
+            }
+        }
+    }
+
+    let dest_base = dest_pglite.join("base");
+    if let Some(ref seed_path) = pgdata_seed_path {
+        if seed_path.exists() {
+            extract_pgdata_seed(seed_path, &dest_base)?;
+        } else {
+            eprintln!("[PGDATA] Seed not found at {:?}, will run initdb", seed_path);
+        }
+    }
+
+    let mut wasi_builder = build_base_wasi_builder();
+    wasi_builder
+        .env("PGDATA", "/tmp/pglite/base")
+        .env("PREFIX", "/tmp/pglite")
+        .env("PGSYSCONFDIR", "/tmp/pglite");
+
+    wasi_builder.preopened_dir(
+        &isolated_tmp,
+        "/tmp",
+        DirPerms::all(),
+        FilePerms::all(),
+    ).context("Failed to preopen tmp directory")?;
+
+    wasi_builder.preopened_dir(
+        "/dev",
+        "/dev",
+        DirPerms::READ,
+        FilePerms::READ,
+    ).context("Failed to preopen /dev directory")?;
+
+    Ok(WasiSetupResult {
+        wasi_builder,
+        memory_tmp_dir: Some(isolated_tmp),
+    })
+}
+
+fn build_persistent_mode_wasi(
+    prefix_dir: &Path,
+    data_dir: &Path,
+) -> Result<WasiSetupResult> {
+    let tmp_dir = prefix_dir.join("tmp");
+    std::fs::create_dir_all(data_dir)?;
+    let actual_data_dir = data_dir.canonicalize()?;
+    let data_dir_str = actual_data_dir.to_str()
+        .context("Data directory path is not valid UTF-8")?;
+
+    let mut wasi_builder = build_base_wasi_builder();
+    wasi_builder
+        .env("PGDATA", data_dir_str)
+        .env("PREFIX", "/tmp/pglite")
+        .env("PGSYSCONFDIR", "/tmp/pglite");
+
+    wasi_builder.preopened_dir(
+        &tmp_dir,
+        "/tmp",
+        DirPerms::all(),
+        FilePerms::all(),
+    ).context("Failed to preopen tmp directory")?;
+
+    wasi_builder.preopened_dir(
+        &actual_data_dir,
+        data_dir_str,
+        DirPerms::all(),
+        FilePerms::all(),
+    ).context("Failed to preopen data directory")?;
+
+    wasi_builder.preopened_dir(
+        "/dev",
+        "/dev",
+        DirPerms::READ,
+        FilePerms::READ,
+    ).context("Failed to preopen /dev directory")?;
+
+    Ok(WasiSetupResult {
+        wasi_builder,
+        memory_tmp_dir: None,
+    })
+}
+
 pub struct PgliteRuntime {
     pub store: Arc<Mutex<Store<WasiP1Ctx>>>,
     pub instance: wasmtime::Instance,
@@ -235,122 +379,13 @@ impl PgliteRuntime {
         let prefix_dir = config.prefix_dir.canonicalize()
             .context("Failed to canonicalize prefix directory")?;
 
-        let mut wasi_builder = WasiCtxBuilder::new();
-
-        wasi_builder
-            .inherit_stdio()
-            .env("PGCLIENTENCODING", "UTF8")
-            .env("REPL", "N")
-            .env("LC_CTYPE", "en_US.UTF-8")
-            .env("TZ", "UTC")
-            .env("PGTZ", "UTC")
-            .env("PGDATABASE", "template1")
-            .env("PG_COLOR", "always")
-            .env("PGUSER", "postgres");
-
-        let memory_tmp_dir: Option<PathBuf>;
-
-        if is_memory_mode {
-            let unique_id = std::process::id();
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let isolated_tmp = std::env::temp_dir().join(format!("pglite_mem_{}_{}", unique_id, timestamp));
-
-            std::fs::create_dir_all(&isolated_tmp)?;
-
-            let source_pglite = prefix_dir.join("tmp/pglite");
-            let dest_pglite = isolated_tmp.join("pglite");
-            std::fs::create_dir_all(&dest_pglite)?;
-
-            let source_share = source_pglite.join("share");
-            let dest_share = dest_pglite.join("share");
-            if source_share.exists() {
-                copy_dir_recursive(&source_share, &dest_share)?;
-            }
-
-            for entry in std::fs::read_dir(&source_pglite)? {
-                let entry = entry?;
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str != "share" && name_str != "base" {
-                    let src_path = entry.path();
-                    let dst_path = dest_pglite.join(&name);
-                    if src_path.is_dir() {
-                        copy_dir_recursive(&src_path, &dst_path)?;
-                    } else {
-                        std::fs::copy(&src_path, &dst_path)?;
-                    }
-                }
-            }
-
-            // Extract PGDATA seed if provided - this skips the expensive initdb
-            let dest_base = dest_pglite.join("base");
-            if let Some(ref seed_path) = config.pgdata_seed_path {
-                if seed_path.exists() {
-                    extract_pgdata_seed(seed_path, &dest_base)?;
-                } else {
-                    eprintln!("[PGDATA] Seed not found at {:?}, will run initdb", seed_path);
-                }
-            }
-
-            memory_tmp_dir = Some(isolated_tmp.clone());
-
-            wasi_builder
-                .env("PGDATA", "/tmp/pglite/base")
-                .env("PREFIX", "/tmp/pglite")
-                .env("PGSYSCONFDIR", "/tmp/pglite");
-
-            wasi_builder.preopened_dir(
-                &isolated_tmp,
-                "/tmp",
-                DirPerms::all(),
-                FilePerms::all(),
-            ).context("Failed to preopen tmp directory")?;
-
-            wasi_builder.preopened_dir(
-                "/dev",
-                "/dev",
-                DirPerms::READ,
-                FilePerms::READ,
-            ).context("Failed to preopen /dev directory")?;
+        let mut wasi_setup = if is_memory_mode {
+            build_memory_mode_wasi(&prefix_dir, &config.pgdata_seed_path)?
         } else {
-            memory_tmp_dir = None;
-            let tmp_dir = prefix_dir.join("tmp");
-            std::fs::create_dir_all(&config.data_dir)?;
-            let actual_data_dir = config.data_dir.canonicalize()?;
-            let data_dir_str = actual_data_dir.to_str()
-                .context("Data directory path is not valid UTF-8")?;
+            build_persistent_mode_wasi(&prefix_dir, &config.data_dir)?
+        };
 
-            wasi_builder
-                .env("PGDATA", data_dir_str)
-                .env("PREFIX", "/tmp/pglite")
-                .env("PGSYSCONFDIR", "/tmp/pglite");
-
-            wasi_builder.preopened_dir(
-                &tmp_dir,
-                "/tmp",
-                DirPerms::all(),
-                FilePerms::all(),
-            ).context("Failed to preopen tmp directory")?;
-
-            wasi_builder.preopened_dir(
-                &actual_data_dir,
-                data_dir_str,
-                DirPerms::all(),
-                FilePerms::all(),
-            ).context("Failed to preopen data directory")?;
-
-            wasi_builder.preopened_dir(
-                "/dev",
-                "/dev",
-                DirPerms::READ,
-                FilePerms::READ,
-            ).context("Failed to preopen /dev directory")?;
-        }
-
-        let wasi = wasi_builder.build_p1();
+        let wasi = wasi_setup.wasi_builder.build_p1();
 
         let mut store = Store::new(engine, wasi);
         let mut linker = Linker::new(engine);
@@ -376,7 +411,7 @@ impl PgliteRuntime {
             data_dir,
             buffer_addr: 0,
             buffer_size: 0,
-            memory_tmp_dir,
+            memory_tmp_dir: wasi_setup.memory_tmp_dir,
         })
     }
 
@@ -484,7 +519,8 @@ impl PgliteRuntime {
     fn interactive_read_locked(&self, store: &mut Store<WasiP1Ctx>) -> Result<i32> {
         if let Some(func) = self.instance.get_func(&mut *store, "interactive_read") {
             let mut results = [Val::I32(0)];
-            func.call(store, &[], &mut results)?;
+            func.call(store, &[], &mut results)
+                .context("Failed to call interactive_read WASM function")?;
             if let Val::I32(len) = results[0] {
                 return Ok(len);
             }
@@ -511,7 +547,7 @@ impl PgliteRuntime {
 
         let response_offset = data.len() + 1;
 
-        for _ in 0..=10 {
+        for _ in 0..MAX_RESPONSE_POLL_ITERATIONS {
             let response_len = self.interactive_read_locked(&mut store)?;
             if response_len > 0 {
                 return self.read_from_buffer_at_offset_locked(&mut store, response_len as usize, response_offset);
@@ -527,7 +563,9 @@ impl PgliteRuntime {
 impl Drop for PgliteRuntime {
     fn drop(&mut self) {
         if let Some(ref tmp_dir) = self.memory_tmp_dir {
-            let _ = std::fs::remove_dir_all(tmp_dir);
+            if let Err(e) = std::fs::remove_dir_all(tmp_dir) {
+                eprintln!("[WARNING] Failed to clean up temp dir {:?}: {}", tmp_dir, e);
+            }
         }
     }
 }

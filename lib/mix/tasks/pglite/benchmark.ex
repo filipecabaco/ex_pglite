@@ -76,16 +76,22 @@ defmodule Mix.Tasks.Pglite.Benchmark do
     if "--help" in args or "-h" in args do
       Mix.shell().info(@moduledoc)
     else
-      # Use apply to avoid compile-time warnings for runtime-loaded modules
-      config = apply(Benchmark.Config, :parse_cli_args, [args])
+      run_benchmark(args)
+    end
+  end
 
-      case apply(Benchmark.Orchestrator, :run, [config]) do
-        {:ok, _results} ->
-          Mix.shell().info("\nBenchmark completed successfully!")
+  # Modules are loaded at runtime from benchmark/ directory, so apply/3 is required.
+  defp run_benchmark(args) do
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    config = apply(Benchmark.Config, :parse_cli_args, [args])
 
-        {:error, reason} ->
-          Mix.raise("Benchmark failed: #{inspect(reason)}")
-      end
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    case apply(Benchmark.Orchestrator, :run, [config]) do
+      {:ok, _results} ->
+        Mix.shell().info("\nBenchmark completed successfully!")
+
+      {:error, reason} ->
+        Mix.raise("Benchmark failed: #{inspect(reason)}")
     end
   end
 end

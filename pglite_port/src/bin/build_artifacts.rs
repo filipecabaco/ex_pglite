@@ -1,30 +1,30 @@
-/// Unified build script for PGlite artifacts
-///
-/// This creates all the artifacts needed for fast PGlite startup:
-/// 1. Pre-compiled WASM module (.cwasm)
-/// 2. Pre-initialized PGDATA seed with clean shutdown state
-///
-/// The PGDATA seed is created by running PGlite in file mode, letting it
-/// initialize completely, then capturing the database files after a clean
-/// shutdown.
-///
-/// Usage: build_artifacts <wasm_path> <prefix_dir> <output_dir>
-///
-/// Example:
-///   cargo run --release --example build_artifacts -- \
-///     priv/pglite.wasi \
-///     priv/pglite_prefix \
-///     priv
-///
-/// Output files:
-///   - <output_dir>/pglite.cwasm - Pre-compiled WASM module
-///   - <output_dir>/pgdata_seed.tar.zst - Pre-initialized PGDATA
+//! Unified build script for PGlite artifacts
+//!
+//! This creates all the artifacts needed for fast PGlite startup:
+//! 1. Pre-compiled WASM module (.cwasm)
+//! 2. Pre-initialized PGDATA seed with clean shutdown state
+//!
+//! The PGDATA seed is created by running PGlite in file mode, letting it
+//! initialize completely, then capturing the database files after a clean
+//! shutdown.
+//!
+//! Usage: build_artifacts <wasm_path> <prefix_dir> <output_dir>
+//!
+//! Example:
+//!   cargo run --release --example build_artifacts -- \
+//!     priv/pglite.wasi \
+//!     priv/pglite_prefix \
+//!     priv
+//!
+//! Output files:
+//!   - <output_dir>/pglite.cwasm - Pre-compiled WASM module
+//!   - <output_dir>/pgdata_seed.tar.zst - Pre-initialized PGDATA
 
 use anyhow::{Context, Result};
 use pglite_port::{PgliteConfig, PgliteRuntime};
 use std::env;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use wasmtime::{Config, Engine, Module};
 
@@ -86,7 +86,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn precompile_wasm(input: &PathBuf, output: &PathBuf) -> Result<()> {
+fn precompile_wasm(input: &Path, output: &Path) -> Result<()> {
     let mut config = Config::new();
     config.memory_init_cow(true);
     config.table_lazy_init(true);
@@ -108,7 +108,7 @@ fn precompile_wasm(input: &PathBuf, output: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn create_pgdata_seed(cwasm_path: &PathBuf, prefix_dir: &PathBuf, output: &PathBuf) -> Result<()> {
+fn create_pgdata_seed(cwasm_path: &Path, prefix_dir: &Path, output: &Path) -> Result<()> {
     // Create a temporary directory for PGDATA (file mode, not memory mode)
     let pgdata_dir = std::env::temp_dir().join(format!("pglite_build_seed_{}", std::process::id()));
     std::fs::create_dir_all(&pgdata_dir)?;
@@ -122,7 +122,7 @@ fn create_pgdata_seed(cwasm_path: &PathBuf, prefix_dir: &PathBuf, output: &PathB
         data_dir: pgdata_dir.clone(),
         tcp_port: 0, // Not used
         wasm_path: wasm_path.clone(),
-        prefix_dir: prefix_dir.clone(),
+        prefix_dir: prefix_dir.to_path_buf(),
         pgdata_seed_path: None,
     };
 
@@ -167,12 +167,12 @@ fn create_pgdata_seed(cwasm_path: &PathBuf, prefix_dir: &PathBuf, output: &PathB
     Ok(())
 }
 
-fn create_tarball(dir: &PathBuf) -> Result<Vec<u8>> {
+fn create_tarball(dir: &Path) -> Result<Vec<u8>> {
     let mut tar_data = Vec::new();
 
     {
         let mut builder = tar::Builder::new(&mut tar_data);
-        add_dir_to_tar(&mut builder, dir, &PathBuf::new())?;
+        add_dir_to_tar(&mut builder, dir, Path::new(""))?;
         builder.finish()?;
     }
 
@@ -181,8 +181,8 @@ fn create_tarball(dir: &PathBuf) -> Result<Vec<u8>> {
 
 fn add_dir_to_tar<W: Write>(
     builder: &mut tar::Builder<W>,
-    base_dir: &PathBuf,
-    relative_path: &PathBuf,
+    base_dir: &Path,
+    relative_path: &Path,
 ) -> Result<()> {
     let current_dir = base_dir.join(relative_path);
 
