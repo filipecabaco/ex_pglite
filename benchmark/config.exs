@@ -87,7 +87,7 @@ defmodule Benchmark.Config do
       operations: Keyword.get(opts, :operations, [:read, :write, :transaction]),
       cooldown_seconds: Keyword.get(opts, :cooldown_seconds, 0),
       startup_timeout_seconds: Keyword.get(opts, :startup_timeout_seconds, default_startup_timeout),
-      pool_size: Keyword.get(opts, :pool_size, 10)
+      pool_size: Keyword.get(opts, :pool_size, 1)
     }
   end
 
@@ -142,7 +142,7 @@ defmodule Benchmark.Config do
       output_file: Keyword.get(opts, :output),
       cooldown_seconds: Keyword.get(opts, :cooldown, 0),
       startup_timeout_seconds: Keyword.get(opts, :startup_timeout, default_startup_timeout),
-      pool_size: Keyword.get(opts, :pool_size, 10)
+      pool_size: Keyword.get(opts, :pool_size, 1)
     )
   end
 

@@ -41,7 +41,33 @@ With pool_size=10:
 - Context switching and scheduling overhead
 - P99 latency explodes (5ms → 4000ms for reads)
 
-**Recommendation:** Use `pool_size: 1` for PGlite connections.
+**Recommendation:** Always use `pool_size: 1` for PGlite connections in your Elixir application:
+
+```elixir
+# In your application config
+config :my_app, MyApp.Repo,
+  pool_size: 1  # Critical for PGlite performance
+```
+
+---
+
+## Key Discoveries
+
+### Discovery 1: Pool Size = 1 is Optimal
+
+Traditional database wisdom says "more connections = more throughput." With PGlite's single-threaded WASM, the opposite is true. Testing revealed:
+
+- **88% throughput loss** with pool_size=10 vs pool_size=1
+- **800x latency increase** for P99 (5ms → 4000ms)
+- Zero benefit from additional connections
+
+### Discovery 2: Async I/O Matters for Transactions
+
+Replacing polling (`try_read` + 1ms sleep) with proper async I/O (`read().await`) yielded **+182% transaction throughput**. The artificial delay between statements (BEGIN → SELECT → UPDATE → COMMIT) was the bottleneck.
+
+### Discovery 3: Memory Never Shrinks
+
+WebAssembly lacks `memory.shrink`. Under load, memory grew to 1.4GB and never reclaimed. Instance recycling is the only solution.
 
 ---
 
@@ -131,12 +157,15 @@ Route queries to multiple PGlite instances based on tenant/key.
 ## Benchmark Configuration
 
 ```bash
-# Recommended settings
-mix run benchmark/run.exs -n <profile> -d <seconds> --pool-size 1
+# Default settings (pool_size=1 is now the default)
+mix run benchmark/run.exs -n <profile> -d <seconds>
 
 # Profiles: reads_only, writes_only, transactions_only, max
 # Example: 3-minute read benchmark
-mix run benchmark/run.exs -n reads_only -d 180 --pool-size 1
+mix run benchmark/run.exs -n reads_only -d 180
+
+# To test concurrency overhead (not recommended for production)
+mix run benchmark/run.exs -n reads_only -d 180 --pool-size 10
 ```
 
 ---
