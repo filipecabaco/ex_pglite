@@ -4,11 +4,12 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot, Notify, Semaphore};
 use wasmtime::{Config, Engine, Linker, Memory, Module, Store, Val};
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
-static CONNECTION_SERIALIZER: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static WASM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::const_new(1));
 
 const MAX_RESPONSE_POLL_ITERATIONS: u8 = 11;
 
@@ -64,57 +65,182 @@ struct ErrorPattern {
 
 const ERROR_PATTERNS: &[ErrorPattern] = &[
     // Class 42 - Syntax Error or Access Rule Violation
-    ErrorPattern { function_patterns: &["parserOpenTable", "addRangeTableEntry", "RangeVarGetRelid", "relation_openrv"], sql_code: "42P01", message: "relation does not exist" },
-    ErrorPattern { function_patterns: &["ParseFuncOrColumn", "LookupFuncName", "LookupFuncWithArgs"], sql_code: "42883", message: "function does not exist" },
-    ErrorPattern { function_patterns: &["transformColumnRef", "colNameToVar", "errorMissingColumn"], sql_code: "42703", message: "column does not exist" },
-    ErrorPattern { function_patterns: &["scanner_yyerror", "base_yyerror", "syntax_error"], sql_code: "42601", message: "syntax error" },
-    ErrorPattern { function_patterns: &["aclcheck", "permission", "pg_aclcheck"], sql_code: "42501", message: "permission denied" },
-    ErrorPattern { function_patterns: &["LookupTypeName", "typenameType", "TypeNameToString"], sql_code: "42704", message: "undefined object" },
-    ErrorPattern { function_patterns: &["LookupOperName", "LookupOperWithArgs", "oper_select_candidate"], sql_code: "42883", message: "operator does not exist" },
-    ErrorPattern { function_patterns: &["errorMissingRTE", "errorConflictingDefElem"], sql_code: "42P01", message: "undefined table" },
-    ErrorPattern { function_patterns: &["transformExpr", "coerce_type", "coerce_to_target_type"], sql_code: "42846", message: "cannot coerce" },
-    ErrorPattern { function_patterns: &["RI_FKey_check", "ri_Check_Pk_Match"], sql_code: "23503", message: "foreign key violation" },
-
+    ErrorPattern {
+        function_patterns: &[
+            "parserOpenTable",
+            "addRangeTableEntry",
+            "RangeVarGetRelid",
+            "relation_openrv",
+        ],
+        sql_code: "42P01",
+        message: "relation does not exist",
+    },
+    ErrorPattern {
+        function_patterns: &["ParseFuncOrColumn", "LookupFuncName", "LookupFuncWithArgs"],
+        sql_code: "42883",
+        message: "function does not exist",
+    },
+    ErrorPattern {
+        function_patterns: &["transformColumnRef", "colNameToVar", "errorMissingColumn"],
+        sql_code: "42703",
+        message: "column does not exist",
+    },
+    ErrorPattern {
+        function_patterns: &["scanner_yyerror", "base_yyerror", "syntax_error"],
+        sql_code: "42601",
+        message: "syntax error",
+    },
+    ErrorPattern {
+        function_patterns: &["aclcheck", "permission", "pg_aclcheck"],
+        sql_code: "42501",
+        message: "permission denied",
+    },
+    ErrorPattern {
+        function_patterns: &["LookupTypeName", "typenameType", "TypeNameToString"],
+        sql_code: "42704",
+        message: "undefined object",
+    },
+    ErrorPattern {
+        function_patterns: &[
+            "LookupOperName",
+            "LookupOperWithArgs",
+            "oper_select_candidate",
+        ],
+        sql_code: "42883",
+        message: "operator does not exist",
+    },
+    ErrorPattern {
+        function_patterns: &["errorMissingRTE", "errorConflictingDefElem"],
+        sql_code: "42P01",
+        message: "undefined table",
+    },
+    ErrorPattern {
+        function_patterns: &["transformExpr", "coerce_type", "coerce_to_target_type"],
+        sql_code: "42846",
+        message: "cannot coerce",
+    },
+    ErrorPattern {
+        function_patterns: &["RI_FKey_check", "ri_Check_Pk_Match"],
+        sql_code: "23503",
+        message: "foreign key violation",
+    },
     // Class 23 - Integrity Constraint Violation
-    ErrorPattern { function_patterns: &["ExecConstraints", "_bt_check_unique", "unique_key_recheck"], sql_code: "23505", message: "unique constraint violation" },
-    ErrorPattern { function_patterns: &["ExecRelCheck", "ExecPartitionCheck", "domain_check_input"], sql_code: "23514", message: "check constraint violation" },
-    ErrorPattern { function_patterns: &["ExecCheckIndexConstraints", "check_exclusion_constraint"], sql_code: "23P01", message: "exclusion constraint violation" },
-    ErrorPattern { function_patterns: &["ri_ReportViolation", "RI_FKey_noaction", "RI_FKey_restrict"], sql_code: "23503", message: "foreign key violation" },
-    ErrorPattern { function_patterns: &["not_null_violation", "ExecConstraints"], sql_code: "23502", message: "not null violation" },
-    ErrorPattern { function_patterns: &["ExecInsert", "ExecUpdate", "ExecDelete"], sql_code: "23000", message: "integrity constraint violation" },
-
+    ErrorPattern {
+        function_patterns: &["ExecConstraints", "_bt_check_unique", "unique_key_recheck"],
+        sql_code: "23505",
+        message: "unique constraint violation",
+    },
+    ErrorPattern {
+        function_patterns: &["ExecRelCheck", "ExecPartitionCheck", "domain_check_input"],
+        sql_code: "23514",
+        message: "check constraint violation",
+    },
+    ErrorPattern {
+        function_patterns: &["ExecCheckIndexConstraints", "check_exclusion_constraint"],
+        sql_code: "23P01",
+        message: "exclusion constraint violation",
+    },
+    ErrorPattern {
+        function_patterns: &["ri_ReportViolation", "RI_FKey_noaction", "RI_FKey_restrict"],
+        sql_code: "23503",
+        message: "foreign key violation",
+    },
+    ErrorPattern {
+        function_patterns: &["not_null_violation", "ExecConstraints"],
+        sql_code: "23502",
+        message: "not null violation",
+    },
+    ErrorPattern {
+        function_patterns: &["ExecInsert", "ExecUpdate", "ExecDelete"],
+        sql_code: "23000",
+        message: "integrity constraint violation",
+    },
     // Class 22 - Data Exception
-    ErrorPattern { function_patterns: &["division_by_zero", "int4div", "int8div", "float8div"], sql_code: "22012", message: "division by zero" },
-    ErrorPattern { function_patterns: &["numeric_overflow", "overflow", "int4mul", "int8mul"], sql_code: "22003", message: "numeric value out of range" },
-    ErrorPattern { function_patterns: &["DateTimeParseError", "datetime_field_overflow"], sql_code: "22008", message: "datetime field overflow" },
-    ErrorPattern { function_patterns: &["invalid_text_representation", "pg_strtoint"], sql_code: "22P02", message: "invalid text representation" },
-    ErrorPattern { function_patterns: &["string_data_right_truncation", "varchar"], sql_code: "22001", message: "string data right truncation" },
-
+    ErrorPattern {
+        function_patterns: &["division_by_zero", "int4div", "int8div", "float8div"],
+        sql_code: "22012",
+        message: "division by zero",
+    },
+    ErrorPattern {
+        function_patterns: &["numeric_overflow", "overflow", "int4mul", "int8mul"],
+        sql_code: "22003",
+        message: "numeric value out of range",
+    },
+    ErrorPattern {
+        function_patterns: &["DateTimeParseError", "datetime_field_overflow"],
+        sql_code: "22008",
+        message: "datetime field overflow",
+    },
+    ErrorPattern {
+        function_patterns: &["invalid_text_representation", "pg_strtoint"],
+        sql_code: "22P02",
+        message: "invalid text representation",
+    },
+    ErrorPattern {
+        function_patterns: &["string_data_right_truncation", "varchar"],
+        sql_code: "22001",
+        message: "string data right truncation",
+    },
     // Class 3D - Invalid Catalog Name
-    ErrorPattern { function_patterns: &["get_database_oid", "GetDatabasePath"], sql_code: "3D000", message: "invalid catalog name" },
-
+    ErrorPattern {
+        function_patterns: &["get_database_oid", "GetDatabasePath"],
+        sql_code: "3D000",
+        message: "invalid catalog name",
+    },
     // Class 3F - Invalid Schema Name
-    ErrorPattern { function_patterns: &["LookupNamespace", "get_namespace_oid", "schema"], sql_code: "3F000", message: "invalid schema name" },
-
+    ErrorPattern {
+        function_patterns: &["LookupNamespace", "get_namespace_oid", "schema"],
+        sql_code: "3F000",
+        message: "invalid schema name",
+    },
     // Class 40 - Transaction Rollback
-    ErrorPattern { function_patterns: &["deadlock_detected", "DeadLockReport", "CheckDeadLock"], sql_code: "40P01", message: "deadlock detected" },
-    ErrorPattern { function_patterns: &["serialization_failure", "OnConflict"], sql_code: "40001", message: "serialization failure" },
-
+    ErrorPattern {
+        function_patterns: &["deadlock_detected", "DeadLockReport", "CheckDeadLock"],
+        sql_code: "40P01",
+        message: "deadlock detected",
+    },
+    ErrorPattern {
+        function_patterns: &["serialization_failure", "OnConflict"],
+        sql_code: "40001",
+        message: "serialization failure",
+    },
     // Class 53 - Insufficient Resources
-    ErrorPattern { function_patterns: &["out_of_memory", "MemoryContextAlloc"], sql_code: "53200", message: "out of memory" },
-    ErrorPattern { function_patterns: &["disk_full", "FileWrite"], sql_code: "53100", message: "disk full" },
-
+    ErrorPattern {
+        function_patterns: &["out_of_memory", "MemoryContextAlloc"],
+        sql_code: "53200",
+        message: "out of memory",
+    },
+    ErrorPattern {
+        function_patterns: &["disk_full", "FileWrite"],
+        sql_code: "53100",
+        message: "disk full",
+    },
     // Class 57 - Operator Intervention
-    ErrorPattern { function_patterns: &["query_canceled", "cancel"], sql_code: "57014", message: "query canceled" },
-
+    ErrorPattern {
+        function_patterns: &["query_canceled", "cancel"],
+        sql_code: "57014",
+        message: "query canceled",
+    },
     // Class 54 - Program Limit Exceeded
-    ErrorPattern { function_patterns: &["too_many_columns", "MaxTupleAttributeNumber"], sql_code: "54011", message: "too many columns" },
-    ErrorPattern { function_patterns: &["statement_too_complex", "expression_too_deep"], sql_code: "54001", message: "statement too complex" },
+    ErrorPattern {
+        function_patterns: &["too_many_columns", "MaxTupleAttributeNumber"],
+        sql_code: "54011",
+        message: "too many columns",
+    },
+    ErrorPattern {
+        function_patterns: &["statement_too_complex", "expression_too_deep"],
+        sql_code: "54001",
+        message: "statement too complex",
+    },
 ];
 
 fn detect_error_from_trap(trap_error: &str) -> (&'static str, Option<&'static str>) {
     for pattern in ERROR_PATTERNS {
-        if pattern.function_patterns.iter().any(|p| trap_error.contains(p)) {
+        if pattern
+            .function_patterns
+            .iter()
+            .any(|p| trap_error.contains(p))
+        {
             return (pattern.sql_code, Some(pattern.message));
         }
     }
@@ -139,8 +265,7 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<()> {
 fn extract_pgdata_seed(seed_path: &Path, dest_dir: &Path) -> Result<()> {
     use std::io::BufReader;
 
-    let file = std::fs::File::open(seed_path)
-        .context("Failed to open PGDATA seed tarball")?;
+    let file = std::fs::File::open(seed_path).context("Failed to open PGDATA seed tarball")?;
 
     let decoder = zstd::stream::Decoder::new(BufReader::new(file))
         .context("Failed to create zstd decoder")?;
@@ -149,7 +274,8 @@ fn extract_pgdata_seed(seed_path: &Path, dest_dir: &Path) -> Result<()> {
 
     std::fs::create_dir_all(dest_dir)?;
 
-    archive.unpack(dest_dir)
+    archive
+        .unpack(dest_dir)
         .context("Failed to extract PGDATA seed tarball")?;
 
     eprintln!("[PGDATA] Extracted seed to {:?}", dest_dir);
@@ -176,8 +302,8 @@ fn load_module(engine: &Engine, wasm_path: &PathBuf) -> Result<Module> {
     let cwasm_path = wasm_path.with_extension("cwasm");
 
     if cwasm_path.exists() {
-        let cwasm_bytes = std::fs::read(&cwasm_path)
-            .context("Failed to read pre-compiled CWASM")?;
+        let cwasm_bytes =
+            std::fs::read(&cwasm_path).context("Failed to read pre-compiled CWASM")?;
         unsafe {
             Module::deserialize(engine, &cwasm_bytes)
                 .context("Failed to deserialize pre-compiled module")
@@ -277,7 +403,10 @@ fn build_memory_mode_wasi(
         if seed_path.exists() {
             extract_pgdata_seed(seed_path, &dest_base)?;
         } else {
-            eprintln!("[PGDATA] Seed not found at {:?}, will run initdb", seed_path);
+            eprintln!(
+                "[PGDATA] Seed not found at {:?}, will run initdb",
+                seed_path
+            );
         }
     }
 
@@ -287,19 +416,13 @@ fn build_memory_mode_wasi(
         .env("PREFIX", "/tmp/pglite")
         .env("PGSYSCONFDIR", "/tmp/pglite");
 
-    wasi_builder.preopened_dir(
-        &isolated_tmp,
-        "/tmp",
-        DirPerms::all(),
-        FilePerms::all(),
-    ).context("Failed to preopen tmp directory")?;
+    wasi_builder
+        .preopened_dir(&isolated_tmp, "/tmp", DirPerms::all(), FilePerms::all())
+        .context("Failed to preopen tmp directory")?;
 
-    wasi_builder.preopened_dir(
-        "/dev",
-        "/dev",
-        DirPerms::READ,
-        FilePerms::READ,
-    ).context("Failed to preopen /dev directory")?;
+    wasi_builder
+        .preopened_dir("/dev", "/dev", DirPerms::READ, FilePerms::READ)
+        .context("Failed to preopen /dev directory")?;
 
     Ok(WasiSetupResult {
         wasi_builder,
@@ -307,14 +430,12 @@ fn build_memory_mode_wasi(
     })
 }
 
-fn build_persistent_mode_wasi(
-    prefix_dir: &Path,
-    data_dir: &Path,
-) -> Result<WasiSetupResult> {
+fn build_persistent_mode_wasi(prefix_dir: &Path, data_dir: &Path) -> Result<WasiSetupResult> {
     let tmp_dir = prefix_dir.join("tmp");
     std::fs::create_dir_all(data_dir)?;
     let actual_data_dir = data_dir.canonicalize()?;
-    let data_dir_str = actual_data_dir.to_str()
+    let data_dir_str = actual_data_dir
+        .to_str()
         .context("Data directory path is not valid UTF-8")?;
 
     let mut wasi_builder = build_base_wasi_builder();
@@ -323,26 +444,22 @@ fn build_persistent_mode_wasi(
         .env("PREFIX", "/tmp/pglite")
         .env("PGSYSCONFDIR", "/tmp/pglite");
 
-    wasi_builder.preopened_dir(
-        &tmp_dir,
-        "/tmp",
-        DirPerms::all(),
-        FilePerms::all(),
-    ).context("Failed to preopen tmp directory")?;
+    wasi_builder
+        .preopened_dir(&tmp_dir, "/tmp", DirPerms::all(), FilePerms::all())
+        .context("Failed to preopen tmp directory")?;
 
-    wasi_builder.preopened_dir(
-        &actual_data_dir,
-        data_dir_str,
-        DirPerms::all(),
-        FilePerms::all(),
-    ).context("Failed to preopen data directory")?;
+    wasi_builder
+        .preopened_dir(
+            &actual_data_dir,
+            data_dir_str,
+            DirPerms::all(),
+            FilePerms::all(),
+        )
+        .context("Failed to preopen data directory")?;
 
-    wasi_builder.preopened_dir(
-        "/dev",
-        "/dev",
-        DirPerms::READ,
-        FilePerms::READ,
-    ).context("Failed to preopen /dev directory")?;
+    wasi_builder
+        .preopened_dir("/dev", "/dev", DirPerms::READ, FilePerms::READ)
+        .context("Failed to preopen /dev directory")?;
 
     Ok(WasiSetupResult {
         wasi_builder,
@@ -360,6 +477,16 @@ pub struct PgliteRuntime {
     memory_tmp_dir: Option<PathBuf>,
 }
 
+struct QueryRequest {
+    query: Vec<u8>,
+    response_tx: oneshot::Sender<Vec<u8>>,
+}
+
+pub struct AsyncPgliteExecutor {
+    query_tx: mpsc::Sender<QueryRequest>,
+    work_available: Arc<Notify>,
+}
+
 impl PgliteRuntime {
     pub fn new(config: PgliteConfig) -> Result<Self> {
         let engine = create_optimized_engine()?;
@@ -372,11 +499,17 @@ impl PgliteRuntime {
         Self::new_with_engine_and_module(config, &shared.engine, &shared.module)
     }
 
-    fn new_with_engine_and_module(config: PgliteConfig, engine: &Engine, module: &Module) -> Result<Self> {
+    fn new_with_engine_and_module(
+        config: PgliteConfig,
+        engine: &Engine,
+        module: &Module,
+    ) -> Result<Self> {
         let data_dir_str = config.data_dir.to_str().unwrap_or("");
         let is_memory_mode = data_dir_str.starts_with("memory://");
 
-        let prefix_dir = config.prefix_dir.canonicalize()
+        let prefix_dir = config
+            .prefix_dir
+            .canonicalize()
             .context("Failed to canonicalize prefix directory")?;
 
         let mut wasi_setup = if is_memory_mode {
@@ -393,7 +526,8 @@ impl PgliteRuntime {
         wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |s| s)
             .context("Failed to add WASI to linker")?;
 
-        let instance = linker.instantiate(&mut store, module)
+        let instance = linker
+            .instantiate(&mut store, module)
             .context("Failed to instantiate WASM module")?;
 
         let store = Arc::new(Mutex::new(store));
@@ -550,14 +684,81 @@ impl PgliteRuntime {
         for _ in 0..MAX_RESPONSE_POLL_ITERATIONS {
             let response_len = self.interactive_read_locked(&mut store)?;
             if response_len > 0 {
-                return self.read_from_buffer_at_offset_locked(&mut store, response_len as usize, response_offset);
+                return self.read_from_buffer_at_offset_locked(
+                    &mut store,
+                    response_len as usize,
+                    response_offset,
+                );
             }
             self.interactive_one_locked(&mut store)?;
         }
 
         Ok(Vec::new())
     }
+}
 
+impl AsyncPgliteExecutor {
+    pub fn new(runtime: Arc<PgliteRuntime>) -> Self {
+        let (query_tx, query_rx) = mpsc::channel::<QueryRequest>(1000);
+        let work_available = Arc::new(Notify::new());
+        let work_available_clone = Arc::clone(&work_available);
+
+        tokio::spawn(async move {
+            let mut rx = query_rx;
+            let notify = work_available_clone;
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    result = rx.recv() => {
+                        match result {
+                            Some(request) => {
+                                let _permit = WASM_SEMAPHORE.acquire().await;
+
+                                match runtime.process_wire_message(&request.query) {
+                                    Ok(response) => {
+                                        let _ = request.response_tx.send(response);
+                                    }
+                                    Err(_) => {
+                                        let _ = request.response_tx.send(Vec::new());
+                                    }
+                                }
+                            }
+                            None => {
+                                break;
+                            }
+                        }
+                    }
+
+                    _ = notify.notified() => {
+                        continue;
+                    }
+                }
+            }
+        });
+
+        Self {
+            query_tx,
+            work_available,
+        }
+    }
+
+    pub async fn execute_query(&self, query: Vec<u8>) -> Result<Vec<u8>> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = QueryRequest {
+            query,
+            response_tx,
+        };
+
+        if self.query_tx.send(request).await.is_ok() {
+            self.work_available.notify_one();
+            response_rx.await.map_err(|_| anyhow::anyhow!("Query execution failed"))
+        } else {
+            Err(anyhow::anyhow!("Executor channel closed"))
+        }
+    }
 }
 
 impl Drop for PgliteRuntime {
@@ -653,10 +854,7 @@ fn find_ready_for_query(response: &[u8]) -> Option<usize> {
     None
 }
 
-fn ensure_server_version(
-    response: Vec<u8>,
-    has_sent_server_version: &mut bool,
-) -> Vec<u8> {
+fn ensure_server_version(response: Vec<u8>, has_sent_server_version: &mut bool) -> Vec<u8> {
     if response.is_empty() || *has_sent_server_version {
         return response;
     }
@@ -689,17 +887,28 @@ fn message_starts_transaction(data: &[u8]) -> bool {
     if data.is_empty() {
         return false;
     }
-    matches!(data[0], b'P' | b'Q' | b'B' | b'E' | b'D' | b'C' | b'H' | b'F')
+    matches!(
+        data[0],
+        b'P' | b'Q' | b'B' | b'E' | b'D' | b'C' | b'H' | b'F'
+    )
 }
 
 pub fn handle_connection(mut stream: TcpStream, runtime: Arc<PgliteRuntime>) -> Result<()> {
-    use std::sync::MutexGuard;
     use std::time::Duration;
 
     stream.set_nodelay(true)?;
     let mut buf = vec![0u8; 64 * 1024];
     let mut has_sent_server_version = false;
-    let mut held_lock: Option<MutexGuard<'_, ()>> = None;
+
+    let rt = tokio::runtime::Handle::try_current()
+        .unwrap_or_else(|_| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime")
+                .handle()
+                .clone()
+        });
 
     loop {
         stream.set_read_timeout(Some(Duration::from_millis(100)))?;
@@ -707,12 +916,8 @@ pub fn handle_connection(mut stream: TcpStream, runtime: Arc<PgliteRuntime>) -> 
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                let needs_lock = held_lock.is_none()
-                    && (message_starts_transaction(&buf[..n]) || !has_sent_server_version);
-
-                if needs_lock {
-                    held_lock = Some(CONNECTION_SERIALIZER.lock().unwrap());
-                }
+                let _permit = rt.block_on(WASM_SEMAPHORE.acquire())
+                    .expect("Semaphore closed");
 
                 match runtime.process_wire_message(&buf[..n]) {
                     Ok(response) if !response.is_empty() => {
@@ -720,10 +925,6 @@ pub fn handle_connection(mut stream: TcpStream, runtime: Arc<PgliteRuntime>) -> 
                             ensure_server_version(response, &mut has_sent_server_version);
                         stream.write_all(&response)?;
                         stream.flush()?;
-
-                        if response_has_ready_for_query(&response) {
-                            held_lock = None;
-                        }
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -733,6 +934,57 @@ pub fn handle_connection(mut stream: TcpStream, runtime: Arc<PgliteRuntime>) -> 
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
+                continue;
+            }
+            Err(e) => return Err(e).context("Failed to read from client"),
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn handle_connection_async(
+    stream: tokio::net::TcpStream,
+    executor: Arc<AsyncPgliteExecutor>,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut has_sent_server_version = false;
+
+    let mut reader = stream;
+    reader.set_nodelay(true)?;
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+        match reader.try_read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let needs_init = !has_sent_server_version || message_starts_transaction(&buf[..n]);
+
+                if needs_init {
+                    let _permit = WASM_SEMAPHORE.acquire().await;
+                }
+
+                match executor.execute_query(buf[..n].to_vec()).await {
+                    Ok(response) if !response.is_empty() => {
+                        let response =
+                            ensure_server_version(response, &mut has_sent_server_version);
+
+                        if response_has_ready_for_query(&response) {
+                            reader.write_all(&response).await?;
+                            reader.flush().await?;
+                        } else {
+                            reader.write_all(&response).await?;
+                            reader.flush().await?;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 continue;
             }
             Err(e) => return Err(e).context("Failed to read from client"),
@@ -1041,7 +1293,9 @@ mod tests {
 
             let end = msg.payload[i..].iter().position(|&b| b == 0)?;
             if field_type == b'C' {
-                return std::str::from_utf8(&msg.payload[i..i + end]).ok().map(String::from);
+                return std::str::from_utf8(&msg.payload[i..i + end])
+                    .ok()
+                    .map(String::from);
             }
             i += end + 1;
         }
@@ -1147,7 +1401,8 @@ mod tests {
         // Verify ErrorResponse structure
         assert_eq!(response[0], b'E');
 
-        let err_len = u32::from_be_bytes([response[1], response[2], response[3], response[4]]) as usize;
+        let err_len =
+            u32::from_be_bytes([response[1], response[2], response[3], response[4]]) as usize;
         let err_total = 1 + err_len;
 
         // Verify ReadyForQuery follows immediately
@@ -1166,7 +1421,8 @@ mod tests {
 
         // Check for severity field 'S' followed by "ERROR"
         let payload_start = 5;
-        let err_len = u32::from_be_bytes([response[1], response[2], response[3], response[4]]) as usize;
+        let err_len =
+            u32::from_be_bytes([response[1], response[2], response[3], response[4]]) as usize;
         let payload = &response[payload_start..payload_start + err_len - 4];
 
         // First field should be severity

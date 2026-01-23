@@ -92,41 +92,74 @@ defmodule MultiplexerDemo do
     num_connections = 3
     queries_per_conn = 2
 
+    conn_opts =
+      pglite
+      |> Pglite.get_connection_opts()
+      |> Keyword.put(:pool_size, 1)
+      |> Keyword.put(:timeout, 30_000)
+      |> Keyword.put(:connect_timeout, 30_000)
+
     tasks =
       for i <- 1..num_connections do
         Task.async(fn ->
-          conn_opts =
-            pglite
-            |> Pglite.get_connection_opts()
-            |> Keyword.put(:pool_size, 1)
+          case Postgrex.start_link(conn_opts) do
+            {:ok, conn} ->
+              start = System.monotonic_time(:millisecond)
 
-          {:ok, conn} = Postgrex.start_link(conn_opts)
+              results =
+                for j <- 1..queries_per_conn do
+                  case Postgrex.query(conn, "SELECT #{i * 10 + j} AS num", [], timeout: 30_000) do
+                    {:ok, result} ->
+                      [[num]] = result.rows
+                      {:ok, num}
 
-          start = System.monotonic_time(:millisecond)
+                    {:error, reason} ->
+                      {:error, reason}
+                  end
+                end
 
-          for j <- 1..queries_per_conn do
-            {:ok, result} = Postgrex.query(conn, "SELECT #{i * 10 + j} AS num", [])
-            [[_num]] = result.rows
+              elapsed = System.monotonic_time(:millisecond) - start
+
+              GenServer.stop(conn)
+              {:ok, i, elapsed, results}
+
+            {:error, reason} ->
+              {:error, i, reason}
           end
-
-          elapsed = System.monotonic_time(:millisecond) - start
-
-          GenServer.stop(conn)
-          {i, elapsed}
         end)
       end
 
     start_time = System.monotonic_time(:millisecond)
 
-    results = Task.await_many(tasks, 60_000)
+    results = Task.await_many(tasks, 120_000)
 
     total_elapsed = System.monotonic_time(:millisecond) - start_time
-    total_queries = num_connections * queries_per_conn
-    avg_time = results |> Enum.map(fn {_, t} -> t end) |> Enum.sum() |> div(num_connections)
 
-    IO.puts("✓ All #{num_connections} connections completed (#{total_queries} queries)")
-    IO.puts("✓ Total time: #{total_elapsed}ms")
-    IO.puts("✓ Average connection time: #{avg_time}ms")
-    IO.puts("✓ Queries per second: #{Float.round(total_queries / (total_elapsed / 1000), 2)}")
+    {successes, failures} =
+      Enum.split_with(results, fn
+        {:ok, _, _, _} -> true
+        _ -> false
+      end)
+
+    if length(failures) > 0 do
+      IO.puts("✗ #{length(failures)} connections failed:")
+
+      Enum.each(failures, fn {:error, i, reason} ->
+        IO.puts("  Connection #{i}: #{inspect(reason)}")
+      end)
+    end
+
+    if length(successes) > 0 do
+      total_queries = length(successes) * queries_per_conn
+      avg_time = successes |> Enum.map(fn {:ok, _, t, _} -> t end) |> Enum.sum() |> div(length(successes))
+
+      IO.puts("✓ #{length(successes)}/#{num_connections} connections completed (#{total_queries} queries)")
+      IO.puts("✓ Total time: #{total_elapsed}ms")
+      IO.puts("✓ Average connection time: #{avg_time}ms")
+
+      if total_elapsed > 0 do
+        IO.puts("✓ Queries per second: #{Float.round(total_queries / (total_elapsed / 1000), 2)}")
+      end
+    end
   end
 end

@@ -69,8 +69,8 @@ defmodule Transactions do
 
     print_balances(conn, "After transfer")
 
-    # Failed transaction (rollback)
-    IO.puts("\nAttempting transaction that will fail...")
+    # Failed transaction (rollback using DBConnection.rollback)
+    IO.puts("\nAttempting transaction that will fail (using rollback)...")
 
     result =
       Postgrex.transaction(conn, fn conn ->
@@ -81,12 +81,38 @@ defmodule Transactions do
             [Decimal.new("100.00"), "ACC001"]
           )
 
-        raise "Simulated error"
+        DBConnection.rollback(conn, :simulated_error)
       end)
 
     case result do
       {:ok, _} -> IO.puts("Unexpected success")
-      {:error, _} -> IO.puts("Transaction rolled back as expected")
+      {:error, :simulated_error} -> IO.puts("Transaction rolled back as expected")
+      {:error, reason} -> IO.puts("Transaction failed: #{inspect(reason)}")
+    end
+
+    # Also demonstrate exception handling in transactions
+    IO.puts("\nAttempting transaction with exception...")
+
+    result =
+      try do
+        Postgrex.transaction(conn, fn conn ->
+          {:ok, _} =
+            Postgrex.query(
+              conn,
+              "UPDATE accounts SET balance = balance - $1 WHERE account_number = $2",
+              [Decimal.new("50.00"), "ACC001"]
+            )
+
+          raise "Simulated exception"
+        end)
+      rescue
+        e in RuntimeError ->
+          {:error, {:exception, e.message}}
+      end
+
+    case result do
+      {:ok, _} -> IO.puts("Unexpected success")
+      {:error, {:exception, msg}} -> IO.puts("Transaction rolled back after exception: #{msg}")
     end
 
     print_balances(conn, "After rollback (unchanged)")

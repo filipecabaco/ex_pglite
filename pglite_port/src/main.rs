@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
-use pglite_port::{bind_tcp_socket, handle_connection, PgliteConfig, PgliteRuntime};
+use pglite_port::{AsyncPgliteExecutor, PgliteConfig, PgliteRuntime};
 use serde_json::json;
 use std::env;
 use std::path::PathBuf;
@@ -148,7 +148,8 @@ fn setup_signal_handlers() {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     setup_signal_handlers();
 
     let parsed_args = ParsedArgs::parse()?;
@@ -172,35 +173,29 @@ fn main() -> Result<()> {
     let config = parsed_args.into_config();
 
     debug_log!("\n=== Step 1: Creating Runtime ===");
-    let mut runtime = match PgliteRuntime::new(config) {
-        Ok(r) => {
-            debug_log!("✓ Runtime created");
-            debug_log!("  Data dir: {:?}", r.data_dir);
-            r
-        }
-        Err(e) => {
-            eprintln!("Failed to create runtime: {:?}", e);
-            println!(
-                "{}",
-                json!({"id": "ready", "success": false, "error": format!("{:?}", e)})
-            );
-            std::process::exit(1);
-        }
-    };
 
-    debug_log!("\n=== Step 2: Initializing PostgreSQL ===");
-    if has_pgdata_seed {
-        debug_log!("  Using PGDATA seed (skipping initdb)");
-    } else {
-        debug_log!("  No PGDATA seed, running initdb...");
-    }
-    let init_result = runtime.init_postgres();
+    let runtime = tokio::task::spawn_blocking(move || -> Result<PgliteRuntime> {
+        let mut runtime = PgliteRuntime::new(config)?;
 
-    match init_result {
-        Ok(()) => {
-            debug_log!("✓ PostgreSQL initialized");
+        debug_log!("✓ Runtime created");
+        debug_log!("  Data dir: {:?}", runtime.data_dir);
+
+        debug_log!("\n=== Step 2: Initializing PostgreSQL ===");
+        if has_pgdata_seed {
+            debug_log!("  Using PGDATA seed (skipping initdb)");
+        } else {
+            debug_log!("  No PGDATA seed, running initdb...");
         }
-        Err(e) => {
+
+        runtime.init_postgres()?;
+        debug_log!("✓ PostgreSQL initialized");
+
+        Ok(runtime)
+    }).await;
+
+    let runtime = match runtime {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             eprintln!("PostgreSQL initialization failed: {:?}", e);
             println!(
                 "{}",
@@ -208,16 +203,8 @@ fn main() -> Result<()> {
             );
             std::process::exit(1);
         }
-    }
-
-    debug_log!("\n=== Step 3: Binding TCP Socket ===");
-    let listener = match bind_tcp_socket(tcp_port) {
-        Ok(l) => {
-            debug_log!("✓ TCP socket bound to 127.0.0.1:{}", tcp_port);
-            l
-        }
         Err(e) => {
-            eprintln!("Failed to bind TCP socket: {:?}", e);
+            eprintln!("Task join failed: {:?}", e);
             println!(
                 "{}",
                 json!({"id": "ready", "success": false, "error": format!("{:?}", e)})
@@ -225,6 +212,9 @@ fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    debug_log!("\n=== Step 3: Preparing TCP Socket ===");
+    debug_log!("  Will bind to 127.0.0.1:{}", tcp_port);
 
     debug_log!("\n=== Step 4: Ready ===");
     let ready_json = if let Some(ref mode) = multiplexer_mode {
@@ -236,10 +226,15 @@ fn main() -> Result<()> {
     debug_log!("✓ Ready signal sent to Elixir");
 
     let runtime = Arc::new(runtime);
-    let mut connection_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    let executor = Arc::new(AsyncPgliteExecutor::new(Arc::clone(&runtime)));
 
     debug_log!("\n=== Step 5: Accepting Connections ===");
-    listener.set_nonblocking(true)?;
+
+    let tokio_listener = tokio::net::TcpListener::bind(("127.0.0.1", tcp_port))
+        .await
+        .context("Failed to bind Tokio TCP listener")?;
+
+    debug_log!("✓ Tokio TCP listener bound to 127.0.0.1:{}", tcp_port);
 
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
@@ -247,36 +242,34 @@ fn main() -> Result<()> {
             break;
         }
 
-        connection_handles.retain(|h| !h.is_finished());
+        tokio::select! {
+            biased;
 
-        match listener.accept() {
-            Ok((stream, addr)) => {
-                debug_log!("New connection from {:?}", addr);
+            result = tokio_listener.accept() => {
+                match result {
+                    Ok((stream, addr)) => {
+                        debug_log!("New connection from {:?}", addr);
 
-                let runtime_clone = Arc::clone(&runtime);
-                let handle = std::thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream, runtime_clone) {
-                        debug_log!("Connection error from {:?}: {:?}", addr, e);
-                    } else {
-                        debug_log!("Client {:?} disconnected", addr);
+                        let executor_clone = Arc::clone(&executor);
+
+                        tokio::spawn(async move {
+                            if let Err(e) = pglite_port::handle_connection_async(stream, executor_clone).await {
+                                debug_log!("Connection error from {:?}: {:?}", addr, e);
+                            } else {
+                                debug_log!("Client {:?} disconnected", addr);
+                            }
+                        });
                     }
-                });
-                connection_handles.push(handle);
+                    Err(e) => {
+                        debug_log!("Accept error: {:?}", e);
+                    }
+                }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            Err(e) => {
-                debug_log!("Accept error: {:?}", e);
+
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                continue;
             }
         }
-    }
-
-    drop(listener);
-
-    debug_log!("[SHUTDOWN] Waiting for {} connection handlers to finish...", connection_handles.len());
-    for handle in connection_handles {
-        let _ = handle.join();
     }
 
     drop(runtime);
