@@ -25,7 +25,8 @@ defmodule Pglite do
     :connection_opts,
     :startup_timeout,
     :isolated_dir,
-    :pgdata_seed_path
+    :pgdata_seed_path,
+    :multiplexer
   ]
 
   @type t :: %__MODULE__{
@@ -38,7 +39,8 @@ defmodule Pglite do
           connection_opts: keyword(),
           startup_timeout: non_neg_integer(),
           isolated_dir: String.t() | nil,
-          pgdata_seed_path: String.t() | nil
+          pgdata_seed_path: String.t() | nil,
+          multiplexer: boolean()
         }
 
   @doc """
@@ -56,6 +58,7 @@ defmodule Pglite do
   - `:name` - Process name for registration
   - `:isolate` - Create isolated prefix directory with own WASM copy (default: `true`)
   - `:pgdata_seed_path` - Path to pre-initialized PGDATA tarball for faster startup (optional)
+  - `:multiplexer` - Enable connection multiplexer: `true`, `false` (default: `true`)
 
   ## Examples
 
@@ -179,6 +182,7 @@ defmodule Pglite do
 
     tcp_port = Keyword.get(opts, :tcp_port, 54321)
     pgdata_seed_path = Keyword.get(opts, :pgdata_seed_path, get_pgdata_seed_path())
+    multiplexer = Keyword.get(opts, :multiplexer, true)
 
     %__MODULE__{
       port_binary: port_binary,
@@ -196,13 +200,27 @@ defmodule Pglite do
       ],
       startup_timeout: Keyword.get(opts, :startup_timeout, 60_000),
       isolated_dir: isolated_dir,
-      pgdata_seed_path: pgdata_seed_path
+      pgdata_seed_path: pgdata_seed_path,
+      multiplexer: multiplexer
     }
   end
 
   defp start_port(state) do
     args = [state.data_dir, Integer.to_string(state.tcp_port), state.cwasm_path, state.prefix_dir]
-    args = if state.pgdata_seed_path, do: args ++ [state.pgdata_seed_path], else: args
+
+    args =
+      if state.pgdata_seed_path do
+        args ++ [state.pgdata_seed_path]
+      else
+        args
+      end
+
+    args =
+      if state.multiplexer do
+        args ++ ["--multiplexer", "queue"]
+      else
+        args
+      end
 
     port =
       Port.open({:spawn_executable, state.port_binary}, [
@@ -210,11 +228,13 @@ defmodule Pglite do
         :binary,
         :exit_status,
         {:line, 1024},
-        :stderr_to_stdout
+        {:stderr_to_stdout}
       ])
 
     case wait_for_ready(port, state.startup_timeout) do
-      :ok -> {:ok, port}
+      :ok ->
+        {:ok, port}
+
       {:error, reason} ->
         cleanup_port(port)
         {:error, reason}
@@ -275,7 +295,13 @@ defmodule Pglite do
 
   defp get_port_binary_path do
     priv_path = Application.app_dir(:ex_pglite, "priv/bin/pglite_port")
-    if File.exists?(priv_path), do: priv_path, else: "priv/bin/pglite_port"
+    priv_mux_path = Application.app_dir(:ex_pglite, "priv/bin/pglite_port.mux")
+
+    cond do
+      File.exists?(priv_mux_path) -> priv_mux_path
+      File.exists?(priv_path) -> priv_path
+      true -> "priv/bin/pglite_port"
+    end
   end
 
   defp get_cwasm_path do
