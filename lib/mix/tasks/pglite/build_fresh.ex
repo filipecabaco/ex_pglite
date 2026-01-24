@@ -26,6 +26,11 @@ defmodule Mix.Tasks.Pglite.BuildFresh do
           {_output, 0} ->
             File.mkdir_p!("priv/bin")
             File.cp!("pglited/target/release/pglited", "priv/bin/pglited")
+
+            build_priv_bin = Path.join([Mix.Project.build_path(), "lib", "ex_pglite", "priv", "bin"])
+            File.mkdir_p!(build_priv_bin)
+            File.cp!("pglited/target/release/pglited", Path.join(build_priv_bin, "pglited"))
+
             Mix.shell().info("Fresh Rust port binary built ✓")
 
           {output, _} ->

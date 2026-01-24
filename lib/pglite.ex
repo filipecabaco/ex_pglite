@@ -2,7 +2,8 @@ defmodule Pglite do
   @moduledoc """
   Runs PostgreSQL in-process using PGlite (PostgreSQL compiled to WebAssembly).
 
-  Uses a Rust binary with Wasmtime to run the PostgreSQL WASM module.
+  Uses pglited - a Rust binary with Wasmtime that runs the PostgreSQL WASM module.
+  The pglited binary has all assets embedded, making it fully self-contained.
   Exposes a TCP socket on localhost for Postgrex connections.
 
   ## Usage
@@ -20,28 +21,20 @@ defmodule Pglite do
   defstruct [
     :port,
     :port_binary,
-    :cwasm_path,
-    :prefix_dir,
     :data_dir,
     :tcp_port,
     :connection_opts,
     :startup_timeout,
-    :isolated_dir,
-    :pgdata_seed_path,
     :multiplexer
   ]
 
   @type t :: %__MODULE__{
           port: port(),
           port_binary: String.t(),
-          cwasm_path: String.t(),
-          prefix_dir: String.t(),
           data_dir: String.t(),
           tcp_port: integer(),
           connection_opts: keyword(),
           startup_timeout: non_neg_integer(),
-          isolated_dir: String.t() | nil,
-          pgdata_seed_path: String.t() | nil,
           multiplexer: boolean()
         }
 
@@ -58,8 +51,6 @@ defmodule Pglite do
   - `:password` - Password (default: `"password"`)
   - `:startup_timeout` - Timeout in ms (default: `60_000`)
   - `:name` - Process name for registration
-  - `:isolate` - Create isolated prefix directory with own WASM copy (default: `true`)
-  - `:pgdata_seed_path` - Path to pre-initialized PGDATA tarball for faster startup (optional)
   - `:multiplexer` - Enable connection multiplexer: `true`, `false` (default: `true`)
 
   ## Examples
@@ -67,7 +58,6 @@ defmodule Pglite do
       {:ok, pid} = Pglite.start_link()
       {:ok, pid} = Pglite.start_link(memory: false, data_dir: "/path/to/db")
       {:ok, pid} = Pglite.start_link(tcp_port: 54322, name: :my_db)
-      {:ok, pid} = Pglite.start_link(pgdata_seed_path: "priv/pgdata_seed.tar.zst")
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts \\ []) do
@@ -100,26 +90,13 @@ defmodule Pglite do
     Process.flag(:trap_exit, true)
 
     port_binary = Keyword.get(opts, :port_binary, get_port_binary_path())
-    isolate? = Keyword.get(opts, :isolate, true)
 
-    {cwasm_path, prefix_dir, isolated_dir} =
-      if isolate? do
-        setup_isolated_instance(opts)
-      else
-        {
-          Keyword.get(opts, :cwasm_path, get_cwasm_path()),
-          Keyword.get(opts, :prefix_dir, get_prefix_dir()),
-          nil
-        }
-      end
-
-    case validate_paths(port_binary, cwasm_path) do
+    case validate_binary(port_binary) do
       :ok ->
-        state = build_state(opts, port_binary, cwasm_path, prefix_dir, isolated_dir)
+        state = build_state(opts, port_binary)
         initialize_port(state)
 
       {:error, reason} ->
-        if isolated_dir, do: File.rm_rf(isolated_dir)
         {:stop, reason}
     end
   end
@@ -146,7 +123,6 @@ defmodule Pglite do
   @impl true
   def terminate(_reason, state) do
     if state.port, do: cleanup_port(state.port)
-    if state.isolated_dir, do: File.rm_rf(state.isolated_dir)
     :ok
   catch
     kind, error ->
@@ -156,18 +132,12 @@ defmodule Pglite do
 
   # Private functions
 
-  defp validate_paths(port_binary, cwasm_path) do
-    cond do
-      not File.exists?(port_binary) ->
-        Logger.error("pglited binary not found at: #{port_binary}")
-        {:error, :port_binary_not_found}
-
-      not File.exists?(cwasm_path) ->
-        Logger.error("Pre-compiled WASM module not found at: #{cwasm_path}.")
-        {:error, :cwasm_not_found}
-
-      true ->
-        :ok
+  defp validate_binary(port_binary) do
+    if File.exists?(port_binary) do
+      :ok
+    else
+      Logger.error("pglited binary not found at: #{port_binary}")
+      {:error, :port_binary_not_found}
     end
   end
 
@@ -178,25 +148,20 @@ defmodule Pglite do
         {:ok, %{state | port: port}}
 
       {:error, reason} ->
-        if state.isolated_dir, do: File.rm_rf(state.isolated_dir)
         {:stop, reason}
     end
   end
 
-  defp build_state(opts, port_binary, cwasm_path, prefix_dir, isolated_dir) do
+  defp build_state(opts, port_binary) do
     data_dir = resolve_data_dir(opts)
     tcp_port = Keyword.get(opts, :tcp_port, 54_321)
 
     %__MODULE__{
       port_binary: port_binary,
-      cwasm_path: cwasm_path,
-      prefix_dir: prefix_dir,
       data_dir: data_dir,
       tcp_port: tcp_port,
       connection_opts: build_connection_opts(opts, tcp_port),
       startup_timeout: Keyword.get(opts, :startup_timeout, 60_000),
-      isolated_dir: isolated_dir,
-      pgdata_seed_path: Keyword.get(opts, :pgdata_seed_path, get_pgdata_seed_path()),
       multiplexer: Keyword.get(opts, :multiplexer, true)
     }
   end
@@ -224,14 +189,7 @@ defmodule Pglite do
   end
 
   defp start_port(state) do
-    args = [state.data_dir, Integer.to_string(state.tcp_port), state.cwasm_path, state.prefix_dir]
-
-    args =
-      if state.pgdata_seed_path do
-        args ++ [state.pgdata_seed_path]
-      else
-        args
-      end
+    args = [state.data_dir, Integer.to_string(state.tcp_port)]
 
     args =
       if state.multiplexer do
@@ -311,79 +269,8 @@ defmodule Pglite do
     _, _ -> :ok
   end
 
-  defp resolve_priv_path(relative_path, fallback) do
-    priv_path = Application.app_dir(:ex_pglite, relative_path)
-    if File.exists?(priv_path), do: priv_path, else: fallback
-  end
-
   defp get_port_binary_path do
-    resolve_priv_path("priv/bin/pglited", "priv/bin/pglited")
-  end
-
-  defp get_cwasm_path do
-    resolve_priv_path("priv/pglite.cwasm", "priv/pglite.cwasm")
-  end
-
-  defp get_prefix_dir do
-    resolve_priv_path("priv/pglite_prefix", "priv/pglite_prefix")
-  end
-
-  defp get_pgdata_seed_path do
-    priv_path = Application.app_dir(:ex_pglite, "priv/pgdata_seed.tar.zst")
-    dev_path = "priv/pgdata_seed.tar.zst"
-
-    cond do
-      File.exists?(priv_path) -> priv_path
-      File.exists?(dev_path) -> dev_path
-      true -> nil
-    end
-  end
-
-  defp setup_isolated_instance(opts) do
-    unique_id = System.unique_integer([:positive])
-    isolated_dir = Path.join(System.tmp_dir!(), "pglite_isolated_#{unique_id}")
-    File.mkdir_p!(isolated_dir)
-
-    source_cwasm = Keyword.get(opts, :cwasm_path, get_cwasm_path())
-    source_prefix = Keyword.get(opts, :prefix_dir, get_prefix_dir())
-
-    dest_prefix = Path.join(isolated_dir, "prefix")
-
-    if File.exists?(source_prefix) do
-      copy_prefix_directory(source_prefix, dest_prefix)
-    else
-      File.mkdir_p!(Path.join(dest_prefix, "tmp/pglite/share/postgresql"))
-    end
-
-    dest_cwasm = Path.join(isolated_dir, "pglite.cwasm")
-    if File.exists?(source_cwasm), do: copy_file(source_cwasm, dest_cwasm)
-
-    {dest_cwasm, dest_prefix, isolated_dir}
-  end
-
-  defp copy_file(source, dest) do
-    if Path.expand(source) == Path.expand(dest) do
-      raise "Cannot copy file to itself: #{source}"
-    end
-
-    File.cp!(source, dest)
-  end
-
-  defp copy_prefix_directory(source, dest) do
-    File.mkdir_p!(dest)
-    source_pglite = Path.join(source, "tmp/pglite")
-    dest_pglite = Path.join(dest, "tmp/pglite")
-    File.mkdir_p!(dest_pglite)
-
-    if File.exists?(source_pglite) do
-      source_pglite
-      |> File.ls!()
-      |> Enum.reject(&(&1 == "base"))
-      |> Enum.each(fn entry ->
-        src_path = Path.join(source_pglite, entry)
-        dst_path = Path.join(dest_pglite, entry)
-        File.cp_r!(src_path, dst_path)
-      end)
-    end
+    priv_path = Application.app_dir(:ex_pglite, "priv/bin/pglited")
+    if File.exists?(priv_path), do: priv_path, else: "priv/bin/pglited"
   end
 end
