@@ -159,7 +159,7 @@ defmodule Pglite do
   defp validate_paths(port_binary, cwasm_path) do
     cond do
       not File.exists?(port_binary) ->
-        Logger.error("pglite_port binary not found at: #{port_binary}")
+        Logger.error("pglited binary not found at: #{port_binary}")
         {:error, :port_binary_not_found}
 
       not File.exists?(cwasm_path) ->
@@ -317,13 +317,7 @@ defmodule Pglite do
   end
 
   defp get_port_binary_path do
-    priv_mux_path = Application.app_dir(:ex_pglite, "priv/bin/pglite_port.mux")
-
-    if File.exists?(priv_mux_path) do
-      priv_mux_path
-    else
-      resolve_priv_path("priv/bin/pglite_port", "priv/bin/pglite_port")
-    end
+    resolve_priv_path("priv/bin/pglited", "priv/bin/pglited")
   end
 
   defp get_cwasm_path do

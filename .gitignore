@@ -8,14 +8,14 @@ erl_crash.dump
 pglite-*.tar
 tmp/
 # Rust/Cargo
-pglite_port/target/
-pglite_port/Cargo.lock
+pglited/target/
+pglited/Cargo.lock
 *.rs.bk
 *.pdb
 
 # Built binaries (compiled locally by users)
-priv/bin/pglite_port
-priv/bin/pglite_port.exe
+priv/bin/pglited
+priv/bin/pglited.exe
 
 # Build artifacts from development
 priv/bin/build_artifacts

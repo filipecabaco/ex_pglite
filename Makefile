@@ -43,7 +43,7 @@ build-wasm:
 build-port:
 	@echo "Building Go port binary..."
 	@echo "This requires Go 1.21 or later"
-	@cd pglite_port && $(MAKE) install
+	@cd pglited && $(MAKE) build-release && cp target/release/pglited ../priv/bin/pglited
 	@echo "Go port build complete"
 
 # Build the complete project
@@ -57,7 +57,7 @@ clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf priv/pglite priv/bin
 	mix clean
-	@cd pglite_port && $(MAKE) clean 2>/dev/null || true
+	@cd pglited && $(MAKE) clean 2>/dev/null || true
 	@if [ -d "pglite" ]; then \
 		cd pglite && pnpm clean 2>/dev/null || true; \
 	fi
