@@ -1,5 +1,8 @@
 #!/usr/bin/env elixir
 
+# Set log level to info to reduce noise from debug messages
+Logger.configure(level: :info)
+
 # ExPglite Benchmark Runner
 #
 # Usage:

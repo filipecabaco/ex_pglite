@@ -1,10 +1,65 @@
-# pglite_port
+# PGlite Port
 
-A Rust binary that runs PostgreSQL in-process using WebAssembly via the Wasmtime runtime. This enables running a full PostgreSQL database without any external dependencies.
+A Wasmtime-based PostgreSQL runtime that runs PostgreSQL via WebAssembly.
 
-## Overview
+## Features
 
-`pglite_port` loads a PostgreSQL WASM binary (PGlite) and exposes it as a standard TCP server implementing the PostgreSQL wire protocol. Clients like `psql` or Postgrex can connect to it as if it were a regular PostgreSQL server.
+- **Single Binary Distribution**: All assets embedded in the binary - no external files required
+- **Fast Startup**: Optimized for quick initialization (~100ms)
+- **Memory Mode**: Run entirely in-memory or with persistent storage
+- **Protocol Compatible**: Full PostgreSQL wire protocol support
+
+## Quick Start
+
+Build the release binary with embedded assets:
+
+```bash
+make build-release
+```
+
+Run with embedded assets (no paths needed):
+
+```bash
+# In-memory database on port 5432
+./target/release/pglite_port memory:// 5432
+
+# Persistent storage
+./target/release/pglite_port /tmp/mydb 5432
+```
+
+## Connecting
+
+```bash
+# Using psql
+PGPASSWORD=password psql "host=127.0.0.1 port=5432 user=postgres dbname=template1 sslmode=disable"
+
+# Connection string for any PostgreSQL client
+postgresql://postgres:password@127.0.0.1:5432/template1
+```
+
+## Command Line Options
+
+```bash
+Usage: ./pglite_port <data_dir> <tcp_port> [wasm_path] [prefix_dir] [pgdata_seed_path]
+
+Arguments:
+  data_dir         - Directory for PostgreSQL data (use memory:// for in-memory)
+  tcp_port         - TCP port for PostgreSQL connections
+  wasm_path        - Optional: Path to pglite.wasi binary (embedded if omitted)
+  prefix_dir       - Optional: Directory containing pglite prefix files (embedded if omitted)
+  pgdata_seed_path - Optional: Pre-initialized PGDATA tarball (faster startup)
+```
+
+## Build Targets
+
+```bash
+make help              # Show all available targets
+make build-release     # Build optimized release binary
+make test              # Run all tests
+make clean             # Clean build artifacts
+```
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -23,316 +78,43 @@ A Rust binary that runs PostgreSQL in-process using WebAssembly via the Wasmtime
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Binaries
-
-This crate produces two binaries:
-
-| Binary | Description |
-|--------|-------------|
-| `pglite_port` | Main runtime that runs PostgreSQL and accepts TCP connections |
-| `build_artifacts` | Build tool that creates pre-compiled artifacts for faster startup |
-
-## Standalone Mode
-
-The standalone mode creates a self-contained, portable PostgreSQL distribution that can run anywhere without Elixir or additional dependencies. This is useful for:
-
-- Running PostgreSQL as a standalone service
-- Distributing a portable database with your application
-- Testing and development without the full ex_pglite setup
-
-### Building Standalone Distribution
-
-```bash
-cd pglite_port
-make standalone
-```
-
-This creates a `standalone/` directory containing everything needed to run PostgreSQL:
-
-```
-standalone/
-├── pglite_port           # Main binary (Wasmtime runtime)
-├── pglite.wasi           # PostgreSQL WASM module (~23MB)
-├── pglite.cwasm          # Pre-compiled native code (~43MB, faster startup)
-├── pglite_prefix/        # PostgreSQL share files (timezone, locale, etc.)
-├── pgdata_seed.tar.zst   # Pre-initialized database (~3.5MB)
-├── run.sh                # Convenience wrapper script
-└── README.md             # Usage instructions
-```
-
-### Running Standalone
-
-**Using the wrapper script (recommended):**
-
-```bash
-cd standalone
-
-# Start with defaults (in-memory, port 5432)
-./run.sh
-
-# Custom port
-./run.sh 5433
-
-# Persistent storage
-./run.sh 5432 /path/to/data
-```
-
-**Using the binary directly:**
-
-```bash
-./pglite_port memory:// 5432 ./pglite.wasi ./pglite_prefix ./pgdata_seed.tar.zst
-```
-
-### Connecting to Standalone
-
-Default credentials are `postgres` / `password`:
-
-```bash
-# Using psql
-PGPASSWORD=password psql "host=127.0.0.1 port=5432 user=postgres dbname=template1 sslmode=disable"
-
-# Using any PostgreSQL client
-postgresql://postgres:password@127.0.0.1:5432/template1
-```
-
-### Distributing Standalone
-
-The `standalone/` directory is fully portable. To distribute:
-
-1. Build with `make standalone`
-2. Copy or archive the entire `standalone/` directory
-3. Users run `./run.sh` on the target machine
-
-The only requirement on the target machine is a compatible OS (Linux x86_64 or macOS arm64/x86_64).
-
-## Usage
-
-### pglite_port
-
-```bash
-pglite_port <data_dir> <tcp_port> <wasm_path> <prefix_dir> [pgdata_seed_path]
-```
-
-**Arguments:**
-
-| Argument | Description |
-|----------|-------------|
-| `data_dir` | Directory for PostgreSQL data. Use `memory://` for in-memory mode |
-| `tcp_port` | TCP port to listen on (e.g., 5432) |
-| `wasm_path` | Path to the `pglite.wasi` WebAssembly binary |
-| `prefix_dir` | Directory containing PostgreSQL share files |
-| `pgdata_seed_path` | Optional: Pre-initialized PGDATA tarball for faster startup |
-
-**Examples:**
-
-```bash
-# In-memory database on port 5432
-./pglite_port memory:// 5432 ./pglite.wasi ./pglite_prefix
-
-# Persistent storage
-./pglite_port /var/lib/pglite 5432 ./pglite.wasi ./pglite_prefix
-
-# With pre-initialized seed for faster startup
-./pglite_port memory:// 5432 ./pglite.wasi ./pglite_prefix ./pgdata_seed.tar.zst
-```
-
-### build_artifacts
-
-Creates pre-compiled artifacts to speed up PGlite startup:
-
-```bash
-build_artifacts <wasm_path> <prefix_dir> <output_dir>
-```
-
-**Output files:**
-
-| File | Description |
-|------|-------------|
-| `pglite.cwasm` | Pre-compiled native code from WASM (faster module loading) |
-| `pgdata_seed.tar.zst` | Pre-initialized database (skips ~10s initdb on first run) |
-
 ## How It Works
 
-### 1. Wasmtime Runtime
+### Wasmtime Runtime
 
-The binary uses [Wasmtime](https://wasmtime.dev/) to execute the PGlite WASM module. Key optimizations include:
+The binary uses [Wasmtime](https://wasmtime.dev/) to execute the PGlite WASM module:
 
 - **Copy-on-write memory**: Uses `memory_init_cow(true)` for faster instantiation
-- **Lazy table initialization**: Defers table element initialization with `table_lazy_init(true)`
-- **Pre-compiled modules**: Loads `.cwasm` files (native code) instead of recompiling WASM each time
+- **Lazy table initialization**: Defers table element initialization
+- **Pre-compiled modules**: Loads `.cwasm` files (native code) instead of recompiling WASM
 - **Dense memory images**: Pre-reserves 64MB for PostgreSQL's heap
 
-### 2. WASI Filesystem
-
-PostgreSQL running in WASM needs filesystem access. The binary sets up WASI preopened directories:
-
-```
-/tmp/pglite/          → PostgreSQL prefix (share files, etc.)
-/tmp/pglite/base/     → PGDATA (database files)
-/dev/                 → Read-only access to /dev/urandom
-```
-
-Environment variables configure PostgreSQL:
-
-| Variable | Value | Purpose |
-|----------|-------|---------|
-| `PGDATA` | `/tmp/pglite/base` | Database directory |
-| `PREFIX` | `/tmp/pglite` | PostgreSQL installation prefix |
-| `PGDATABASE` | `template1` | Default database |
-| `PGUSER` | `postgres` | Default user |
-
-### 3. Memory vs Persistent Mode
+### Memory vs Persistent Mode
 
 **Memory mode** (`memory://`):
 - Creates an isolated temporary directory per instance
-- Copies PostgreSQL share files to the temp directory
 - Automatically cleaned up when the process exits
 - Perfect for testing and ephemeral workloads
 
 **Persistent mode** (any filesystem path):
 - Uses the specified directory for PGDATA
 - Data survives process restarts
-- Suitable for development databases that need to persist
 
-### 4. PostgreSQL Wire Protocol
+### Error Handling
 
-The binary implements a subset of the PostgreSQL wire protocol:
-
-1. **Startup**: Clients send a startup message with protocol version and parameters
-2. **Queries**: Simple and extended query protocols are supported
-3. **Responses**: Results, errors, and status messages are forwarded to clients
-
-Key wire protocol handling:
-
-- **Server version injection**: Automatically adds `server_version` parameter (17.5) if missing
-- **Error translation**: WASM traps are converted to proper PostgreSQL error codes
-- **ReadyForQuery**: Ensures clients receive proper transaction state after each command
-
-### 5. Error Handling
-
-When PostgreSQL encounters an error in WASM (e.g., querying a non-existent table), it may trigger a WASM trap. The binary detects these traps and translates them to appropriate PostgreSQL error codes:
+WASM traps are translated to appropriate PostgreSQL error codes:
 
 | WASM Function Pattern | PostgreSQL Code | Meaning |
 |-----------------------|-----------------|---------|
-| `parserOpenTable`, `RangeVarGetRelid` | 42P01 | Undefined table |
-| `ParseFuncOrColumn`, `LookupFuncName` | 42883 | Undefined function |
-| `transformColumnRef`, `colNameToVar` | 42703 | Undefined column |
-| `scanner_yyerror`, `base_yyerror` | 42601 | Syntax error |
-| `ExecConstraints`, `_bt_check_unique` | 23505 | Unique violation |
-| `division_by_zero`, `int4div` | 22012 | Division by zero |
+| `parserOpenTable` | 42P01 | Undefined table |
+| `ParseFuncOrColumn` | 42883 | Undefined function |
+| `transformColumnRef` | 42703 | Undefined column |
+| `scanner_yyerror` | 42601 | Syntax error |
+| `ExecConstraints` | 23505 | Unique violation |
 
-### 6. PGDATA Seed Optimization
+## Environment Variables
 
-The `pgdata_seed.tar.zst` file contains a pre-initialized PostgreSQL data directory. This optimization:
-
-1. **Skips initdb**: First-time PostgreSQL initialization takes ~10 seconds
-2. **Includes clean shutdown state**: Database files are in a consistent state
-3. **Compressed with zstd**: ~2MB compressed vs ~20MB uncompressed
-
-When a seed is provided, the binary extracts it directly instead of running `pgl_initdb`.
-
-### 7. Signal Handling and Lifecycle
-
-The binary monitors stdin for closure (indicating the parent process died) and initiates graceful shutdown:
-
-```rust
-// Pseudo-code
-loop {
-    if stdin.closed() {
-        SHUTDOWN = true;
-        break;
-    }
-}
-// Wait for active connections to finish
-// Clean up temporary directories
-// Exit cleanly
-```
-
-## Communication Protocol
-
-The binary communicates with its parent (typically Elixir) via JSON messages on stdout:
-
-**Ready signal:**
-```json
-{"id": "ready", "success": true, "port": 5432}
-```
-
-**Error signal:**
-```json
-{"id": "ready", "success": false, "error": "Failed to bind port"}
-```
-
-## Architecture
-
-### Source Files
-
-| File | Description |
-|------|-------------|
-| `src/main.rs` | Entry point, CLI argument parsing, TCP accept loop |
-| `src/lib.rs` | Core runtime: WASM loading, wire protocol, error handling |
-| `src/bin/build_artifacts.rs` | Build tool for creating cwasm and pgdata seed |
-
-### Key Structures
-
-**PgliteConfig**: Configuration for creating a runtime instance
-```rust
-pub struct PgliteConfig {
-    pub data_dir: PathBuf,           // Database directory or "memory://"
-    pub tcp_port: u16,               // TCP port for connections
-    pub wasm_path: PathBuf,          // Path to pglite.wasi
-    pub prefix_dir: PathBuf,         // PostgreSQL share files
-    pub pgdata_seed_path: Option<PathBuf>, // Optional pre-initialized PGDATA
-}
-```
-
-**PgliteRuntime**: Manages the WASM instance and processes queries
-```rust
-pub struct PgliteRuntime {
-    store: Arc<Mutex<Store<WasiP1Ctx>>>,  // Wasmtime store with WASI context
-    instance: wasmtime::Instance,          // Instantiated WASM module
-    tcp_port: u16,
-    data_dir: PathBuf,
-    buffer_addr: u32,                      // Shared buffer address in WASM memory
-    buffer_size: u32,                      // Buffer size for wire messages
-    memory_tmp_dir: Option<PathBuf>,       // Temp dir (memory mode only)
-}
-```
-
-## Dependencies
-
-| Crate | Purpose |
-|-------|---------|
-| `wasmtime` | WebAssembly runtime |
-| `wasmtime-wasi` | WASI implementation for filesystem/stdio |
-| `serde_json` | JSON serialization for communication protocol |
-| `anyhow` | Error handling |
-| `zstd` | Compression for PGDATA seed |
-| `tar` | Tarball creation/extraction |
-
-## Debug Mode
-
-Set `PGLITE_DEBUG=1` to enable verbose logging:
-
-```bash
-PGLITE_DEBUG=1 ./pglite_port memory:// 5432 ./pglite.wasi ./pglite_prefix
-```
-
-This outputs detailed information about:
-- Runtime initialization steps
-- WASM function calls
-- TCP connections and disconnections
-- Wire protocol messages
-- Shutdown sequence
-
-## Building
-
-```bash
-cd pglite_port
-cargo build --release
-
-# Binaries are in target/release/
-ls target/release/pglite_port target/release/build_artifacts
-```
+- `PGLITE_DEBUG=1` - Enable verbose debug output
 
 ## Testing
 
@@ -345,4 +127,20 @@ Tests cover:
 - Wire protocol message parsing
 - Error code detection from WASM traps
 - Server version injection
-- Response completeness checking
+
+## Asset Structure
+
+Assets are embedded in the binary at compile time:
+
+- `assets/pglite.wasi` - PostgreSQL WASM module
+- `assets/pglite.cwasm` - Pre-compiled native code (faster startup)
+- `assets/pgdata_seed.tar.zst` - Pre-initialized database seed
+- `assets/prefix.tar.zst` - PostgreSQL share files
+
+## Performance
+
+See [PERFORMANCE.md](../PERFORMANCE.md) for detailed benchmarks.
+
+Key findings:
+- **Use pool_size: 1** - Higher pool sizes cause 55-88% performance degradation
+- **542 QPS reads**, **275 QPS writes**, **96 QPS transactions** (single instance)

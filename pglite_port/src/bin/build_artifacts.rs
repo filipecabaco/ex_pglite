@@ -66,7 +66,10 @@ fn main() -> Result<()> {
     precompile_wasm(&wasm_path, &cwasm_path)?;
     eprintln!("✓ CWASM created in {:?}", start.elapsed());
     if let Ok(metadata) = std::fs::metadata(&cwasm_path) {
-        eprintln!("  Size: {:.2} MB", metadata.len() as f64 / (1024.0 * 1024.0));
+        eprintln!(
+            "  Size: {:.2} MB",
+            metadata.len() as f64 / (1024.0 * 1024.0)
+        );
     }
 
     // Step 2: Create PGDATA seed with clean shutdown
@@ -75,7 +78,10 @@ fn main() -> Result<()> {
     create_pgdata_seed(&cwasm_path, &prefix_dir, &seed_path)?;
     eprintln!("✓ PGDATA seed created in {:?}", start.elapsed());
     if let Ok(metadata) = std::fs::metadata(&seed_path) {
-        eprintln!("  Size: {:.2} MB", metadata.len() as f64 / (1024.0 * 1024.0));
+        eprintln!(
+            "  Size: {:.2} MB",
+            metadata.len() as f64 / (1024.0 * 1024.0)
+        );
     }
 
     eprintln!("\n=== Build Complete ===");
@@ -95,15 +101,12 @@ fn precompile_wasm(input: &Path, output: &Path) -> Result<()> {
     let engine = Engine::new(&config)?;
 
     eprintln!("  Loading WASM module...");
-    let module = Module::from_file(&engine, input)
-        .context("Failed to load WASM module")?;
+    let module = Module::from_file(&engine, input).context("Failed to load WASM module")?;
 
     eprintln!("  Serializing to native code...");
-    let bytes = module.serialize()
-        .context("Failed to serialize module")?;
+    let bytes = module.serialize().context("Failed to serialize module")?;
 
-    std::fs::write(output, &bytes)
-        .context("Failed to write cwasm file")?;
+    std::fs::write(output, &bytes).context("Failed to write cwasm file")?;
 
     Ok(())
 }
@@ -120,24 +123,25 @@ fn create_pgdata_seed(cwasm_path: &Path, prefix_dir: &Path, output: &Path) -> Re
 
     let config = PgliteConfig {
         data_dir: pgdata_dir.clone(),
-        tcp_port: 0, // Not used
-        wasm_path: wasm_path.clone(),
-        prefix_dir: prefix_dir.to_path_buf(),
+        tcp_port: 0,
+        wasm_path: Some(wasm_path.clone()),
+        prefix_dir: Some(prefix_dir.to_path_buf()),
         pgdata_seed_path: None,
     };
 
     eprintln!("  Creating runtime...");
-    let mut runtime = PgliteRuntime::new(config)
-        .context("Failed to create runtime")?;
+    let mut runtime = PgliteRuntime::new(config).context("Failed to create runtime")?;
 
     eprintln!("  Running PGlite initdb (this takes ~10s)...");
-    runtime.init_postgres()
+    runtime
+        .init_postgres()
         .context("Failed to initialize PostgreSQL")?;
 
     // Perform a clean PostgreSQL shutdown with checkpoint
     // This ensures the WAL is flushed and the database is in a consistent state
     eprintln!("  Running PostgreSQL shutdown with checkpoint...");
-    runtime.shutdown()
+    runtime
+        .shutdown()
         .context("Failed to shutdown PostgreSQL cleanly")?;
 
     // Drop the runtime explicitly to release resources
@@ -155,11 +159,10 @@ fn create_pgdata_seed(cwasm_path: &Path, prefix_dir: &Path, output: &Path) -> Re
     let tar_data = create_tarball(&pgdata_dir)?;
 
     eprintln!("  Compressing with zstd...");
-    let compressed = zstd::encode_all(tar_data.as_slice(), 3)
-        .context("Failed to compress tarball")?;
+    let compressed =
+        zstd::encode_all(tar_data.as_slice(), 3).context("Failed to compress tarball")?;
 
-    std::fs::write(output, &compressed)
-        .context("Failed to write output file")?;
+    std::fs::write(output, &compressed).context("Failed to write output file")?;
 
     // Cleanup
     let _ = std::fs::remove_dir_all(&pgdata_dir);

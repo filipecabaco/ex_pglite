@@ -41,8 +41,8 @@ macro_rules! debug_log {
 struct ParsedArgs {
     data_dir: PathBuf,
     tcp_port: u16,
-    wasm_path: PathBuf,
-    prefix_dir: PathBuf,
+    wasm_path: Option<PathBuf>,
+    prefix_dir: Option<PathBuf>,
     pgdata_seed_path: Option<PathBuf>,
     multiplexer_mode: Option<String>,
 }
@@ -51,7 +51,7 @@ impl ParsedArgs {
     fn parse() -> Result<Self> {
         let args: Vec<String> = env::args().collect();
 
-        if args.len() < 5 {
+        if args.len() < 3 {
             Self::print_usage(&args[0]);
             std::process::exit(1);
         }
@@ -60,28 +60,70 @@ impl ParsedArgs {
         let tcp_port: u16 = args[2]
             .parse()
             .context("tcp_port must be a valid port number (1-65535)")?;
-        let wasm_path = PathBuf::from(&args[3]);
-        let prefix_dir = PathBuf::from(&args[4]);
 
+        let mut wasm_path: Option<PathBuf> = None;
+        let mut prefix_dir: Option<PathBuf> = None;
         let mut pgdata_seed_path: Option<PathBuf> = None;
         let mut multiplexer_mode: Option<String> = None;
 
-        let mut i = 5;
+        let mut i = 3;
         while i < args.len() {
-            if args[i] == "--multiplexer" {
-                if i + 1 < args.len() {
-                    multiplexer_mode = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    eprintln!("Error: --multiplexer requires a mode argument (e.g., queue)");
+            match args[i].as_str() {
+                "--wasm" | "--wasm-path" => {
+                    if i + 1 < args.len() {
+                        wasm_path = Some(PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    } else {
+                        eprintln!("Error: --wasm requires a path argument");
+                        std::process::exit(1);
+                    }
+                }
+                "--prefix" | "--prefix-dir" => {
+                    if i + 1 < args.len() {
+                        prefix_dir = Some(PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    } else {
+                        eprintln!("Error: --prefix requires a path argument");
+                        std::process::exit(1);
+                    }
+                }
+                "--pgdata-seed" => {
+                    if i + 1 < args.len() {
+                        pgdata_seed_path = Some(PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    } else {
+                        eprintln!("Error: --pgdata-seed requires a path argument");
+                        std::process::exit(1);
+                    }
+                }
+                "--multiplexer" => {
+                    if i + 1 < args.len() {
+                        multiplexer_mode = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        eprintln!("Error: --multiplexer requires a mode argument (e.g., queue)");
+                        std::process::exit(1);
+                    }
+                }
+                arg if arg.starts_with("--") => {
+                    eprintln!("Unknown argument: {}", arg);
                     std::process::exit(1);
                 }
-            } else if pgdata_seed_path.is_none() && !args[i].starts_with("--") {
-                pgdata_seed_path = Some(PathBuf::from(&args[i]));
-                i += 1;
-            } else {
-                eprintln!("Unknown argument: {}", args[i]);
-                std::process::exit(1);
+                _ => {
+                    if wasm_path.is_none() {
+                        wasm_path = Some(PathBuf::from(&args[i]));
+                        i += 1;
+                    } else if prefix_dir.is_none() {
+                        prefix_dir = Some(PathBuf::from(&args[i]));
+                        i += 1;
+                    } else if pgdata_seed_path.is_none() {
+                        pgdata_seed_path = Some(PathBuf::from(&args[i]));
+                        i += 1;
+                    } else {
+                        eprintln!("Unknown argument: {}", args[i]);
+                        std::process::exit(1);
+                    }
+                }
             }
         }
 
@@ -96,17 +138,24 @@ impl ParsedArgs {
     }
 
     fn print_usage(program_name: &str) {
-        eprintln!("Usage: {} <data_dir> <tcp_port> <wasm_path> <prefix_dir> [pgdata_seed_path] [--multiplexer <mode>]", program_name);
+        eprintln!("Usage: {} <data_dir> <tcp_port> [wasm_path] [prefix_dir] [pgdata_seed_path] [--multiplexer <mode>]", program_name);
         eprintln!();
         eprintln!("Arguments:");
         eprintln!("  data_dir         - Directory for PostgreSQL data");
         eprintln!("  tcp_port         - TCP port for PostgreSQL connections");
-        eprintln!("  wasm_path        - Path to pglite.wasi binary");
-        eprintln!("  prefix_dir       - Directory containing pglite prefix files");
-        eprintln!("  pgdata_seed_path - Optional: pre-initialized PGDATA tarball (faster startup)");
+        eprintln!("  wasm_path        - Optional: Path to pglite.wasi binary (embedded if omitted)");
+        eprintln!("  prefix_dir       - Optional: Directory containing pglite prefix files (embedded if omitted)");
+        eprintln!("  pgdata_seed_path - Optional: Pre-initialized PGDATA tarball (faster startup)");
         eprintln!();
         eprintln!("Options:");
-        eprintln!("  --multiplexer <mode>  - Enable connection multiplexer (mode: queue)");
+        eprintln!("  --wasm <path>           - Path to pglite.wasi binary");
+        eprintln!("  --prefix <path>          - Directory containing pglite prefix files");
+        eprintln!("  --pgdata-seed <path>     - Path to pre-initialized PGDATA tarball");
+        eprintln!("  --multiplexer <mode>      - Enable connection multiplexer (mode: queue)");
+        eprintln!();
+        eprintln!("Examples:");
+        eprintln!("  {} memory:// 5432", program_name);
+        eprintln!("  {} /tmp/db 5432 /path/to/pglite.wasi /path/to/prefix", program_name);
     }
 
     fn into_config(self) -> PgliteConfig {

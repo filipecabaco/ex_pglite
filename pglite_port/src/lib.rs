@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+mod assets;
+use assets::{ensure_prefix_dir, cleanup_prefix_dir, get_pgdata_seed_path};
 use once_cell::sync::Lazy;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -12,6 +14,66 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 static WASM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::const_new(1));
 
 const MAX_RESPONSE_POLL_ITERATIONS: u8 = 11;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryPriority {
+    High,   // Transaction control (COMMIT, ROLLBACK, END, ABORT) and in-transaction queries
+    Normal, // Regular queries
+}
+
+/// Detects query priority from PostgreSQL wire protocol data.
+/// High priority is assigned to transaction control commands (COMMIT, ROLLBACK, etc.)
+/// which should be processed first to release transaction locks quickly.
+fn detect_priority(data: &[u8]) -> QueryPriority {
+    // Simple Query protocol: 'Q' + length (4 bytes) + query string (null-terminated)
+    if data.len() > 5 && data[0] == b'Q' {
+        // Find the null terminator to get the actual query string
+        let query_bytes = &data[5..];
+        let query_end = query_bytes.iter().position(|&b| b == 0).unwrap_or(query_bytes.len());
+
+        if let Ok(sql) = std::str::from_utf8(&query_bytes[..query_end]) {
+            if is_high_priority_command(sql) {
+                return QueryPriority::High;
+            }
+        }
+    }
+
+    // Extended Query protocol: Parse message ('P')
+    // Parse message: 'P' + length + statement_name (null-term) + query (null-term) + param_count
+    if data.len() > 5 && data[0] == b'P' {
+        // Skip statement name (null-terminated)
+        if let Some(name_end) = data[5..].iter().position(|&b| b == 0) {
+            let query_start = 5 + name_end + 1;
+            if query_start < data.len() {
+                let query_bytes = &data[query_start..];
+                let query_end = query_bytes.iter().position(|&b| b == 0).unwrap_or(query_bytes.len());
+
+                if let Ok(sql) = std::str::from_utf8(&query_bytes[..query_end]) {
+                    if is_high_priority_command(sql) {
+                        return QueryPriority::High;
+                    }
+                }
+            }
+        }
+    }
+
+    QueryPriority::Normal
+}
+
+fn is_high_priority_command(sql: &str) -> bool {
+    let trimmed = sql.trim();
+    let first_word = trimmed
+        .split(|c: char| c.is_whitespace() || c == ';')
+        .next()
+        .unwrap_or("");
+
+    let upper = first_word.to_uppercase();
+
+    matches!(
+        upper.as_str(),
+        "COMMIT" | "ROLLBACK" | "END" | "ABORT" | "SAVEPOINT" | "RELEASE"
+    )
+}
 
 struct WireMessage<'a> {
     msg_type: u8,
@@ -298,32 +360,37 @@ fn create_optimized_engine() -> Result<Engine> {
     Engine::new(&config).context("Failed to create Wasmtime engine")
 }
 
-fn load_module(engine: &Engine, wasm_path: &PathBuf) -> Result<Module> {
-    let cwasm_path = wasm_path.with_extension("cwasm");
+fn load_module(engine: &Engine, wasm_path: Option<&PathBuf>) -> Result<Module> {
+    let cwasm_bytes = if let Some(path) = wasm_path {
+        let cwasm_path = path.with_extension("cwasm");
 
-    if cwasm_path.exists() {
-        let cwasm_bytes =
-            std::fs::read(&cwasm_path).context("Failed to read pre-compiled CWASM")?;
-        unsafe {
-            Module::deserialize(engine, &cwasm_bytes)
-                .context("Failed to deserialize pre-compiled module")
+        if cwasm_path.exists() {
+            std::fs::read(&cwasm_path).context("Failed to read pre-compiled CWASM")?
+        } else {
+            anyhow::bail!(
+                "Pre-compiled module not found: {:?}\n\
+                Please run: cargo run --release --example precompile -- {:?} {:?}",
+                cwasm_path,
+                path,
+                cwasm_path
+            );
         }
     } else {
-        anyhow::bail!(
-            "Pre-compiled module not found: {:?}\n\
-            Please run: cargo run --release --example precompile -- {:?} {:?}",
-            cwasm_path,
-            wasm_path,
-            cwasm_path
-        );
+        use crate::assets;
+        assets::PGLITE_CWASM.to_vec()
+    };
+
+    unsafe {
+        Module::deserialize(engine, &cwasm_bytes)
+            .context("Failed to deserialize pre-compiled module")
     }
 }
 
 pub struct PgliteConfig {
     pub data_dir: PathBuf,
     pub tcp_port: u16,
-    pub wasm_path: PathBuf,
-    pub prefix_dir: PathBuf,
+    pub wasm_path: Option<PathBuf>,
+    pub prefix_dir: Option<PathBuf>,
     pub pgdata_seed_path: Option<PathBuf>,
 }
 
@@ -335,7 +402,7 @@ pub struct SharedModule {
 impl SharedModule {
     pub fn new(wasm_path: &PathBuf) -> Result<Self> {
         let engine = create_optimized_engine()?;
-        let module = load_module(&engine, wasm_path)?;
+        let module = load_module(&engine, Some(wasm_path))?;
         Ok(Self { engine, module })
     }
 }
@@ -482,15 +549,19 @@ struct QueryRequest {
     response_tx: oneshot::Sender<Vec<u8>>,
 }
 
+/// Async executor with priority-based query scheduling.
+/// High priority queries (COMMIT, ROLLBACK, etc.) are processed before normal queries
+/// to minimize transaction lock hold times.
 pub struct AsyncPgliteExecutor {
-    query_tx: mpsc::Sender<QueryRequest>,
+    high_priority_tx: mpsc::Sender<QueryRequest>,
+    normal_priority_tx: mpsc::Sender<QueryRequest>,
     work_available: Arc<Notify>,
 }
 
 impl PgliteRuntime {
     pub fn new(config: PgliteConfig) -> Result<Self> {
         let engine = create_optimized_engine()?;
-        let module = load_module(&engine, &config.wasm_path)?;
+        let module = load_module(&engine, config.wasm_path.as_ref())?;
 
         Self::new_with_engine_and_module(config, &engine, &module)
     }
@@ -500,20 +571,26 @@ impl PgliteRuntime {
     }
 
     fn new_with_engine_and_module(
-        config: PgliteConfig,
+        mut config: PgliteConfig,
         engine: &Engine,
         module: &Module,
     ) -> Result<Self> {
         let data_dir_str = config.data_dir.to_str().unwrap_or("");
         let is_memory_mode = data_dir_str.starts_with("memory://");
 
-        let prefix_dir = config
-            .prefix_dir
-            .canonicalize()
-            .context("Failed to canonicalize prefix directory")?;
+        let prefix_dir = if let Some(prefix) = config.prefix_dir {
+            prefix.canonicalize().context("Failed to canonicalize prefix directory")?
+        } else {
+            ensure_prefix_dir()?
+        };
+
+        let pgdata_seed_path = match config.pgdata_seed_path.take() {
+            Some(path) => Some(path),
+            None => get_pgdata_seed_path()?,
+        };
 
         let mut wasi_setup = if is_memory_mode {
-            build_memory_mode_wasi(&prefix_dir, &config.pgdata_seed_path)?
+            build_memory_mode_wasi(&prefix_dir, &pgdata_seed_path)?
         } else {
             build_persistent_mode_wasi(&prefix_dir, &config.data_dir)?
         };
@@ -699,19 +776,46 @@ impl PgliteRuntime {
 
 impl AsyncPgliteExecutor {
     pub fn new(runtime: Arc<PgliteRuntime>) -> Self {
-        let (query_tx, query_rx) = mpsc::channel::<QueryRequest>(1000);
+        // Separate channels for high and normal priority queries
+        // High priority channel is smaller since transaction commands are less frequent
+        let (high_priority_tx, high_priority_rx) = mpsc::channel::<QueryRequest>(100);
+        let (normal_priority_tx, normal_priority_rx) = mpsc::channel::<QueryRequest>(1000);
         let work_available = Arc::new(Notify::new());
         let work_available_clone = Arc::clone(&work_available);
 
         tokio::spawn(async move {
-            let mut rx = query_rx;
+            let mut high_rx = high_priority_rx;
+            let mut normal_rx = normal_priority_rx;
             let notify = work_available_clone;
 
             loop {
+                // biased select ensures high priority queries are always checked first
                 tokio::select! {
                     biased;
 
-                    result = rx.recv() => {
+                    // High priority: transaction control commands (COMMIT, ROLLBACK, etc.)
+                    result = high_rx.recv() => {
+                        match result {
+                            Some(request) => {
+                                let _permit = WASM_SEMAPHORE.acquire().await;
+
+                                match runtime.process_wire_message(&request.query) {
+                                    Ok(response) => {
+                                        let _ = request.response_tx.send(response);
+                                    }
+                                    Err(_) => {
+                                        let _ = request.response_tx.send(Vec::new());
+                                    }
+                                }
+                            }
+                            None => {
+                                // High priority channel closed, but normal might still be active
+                            }
+                        }
+                    }
+
+                    // Normal priority: regular queries
+                    result = normal_rx.recv() => {
                         match result {
                             Some(request) => {
                                 let _permit = WASM_SEMAPHORE.acquire().await;
@@ -731,15 +835,14 @@ impl AsyncPgliteExecutor {
                         }
                     }
 
-                    _ = notify.notified() => {
-                        continue;
-                    }
+                    _ = notify.notified() => {}
                 }
             }
         });
 
         Self {
-            query_tx,
+            high_priority_tx,
+            normal_priority_tx,
             work_available,
         }
     }
@@ -747,14 +850,23 @@ impl AsyncPgliteExecutor {
     pub async fn execute_query(&self, query: Vec<u8>) -> Result<Vec<u8>> {
         let (response_tx, response_rx) = oneshot::channel();
 
+        let priority = detect_priority(&query);
+
         let request = QueryRequest {
             query,
             response_tx,
         };
 
-        if self.query_tx.send(request).await.is_ok() {
+        let send_result = match priority {
+            QueryPriority::High => self.high_priority_tx.send(request).await,
+            QueryPriority::Normal => self.normal_priority_tx.send(request).await,
+        };
+
+        if send_result.is_ok() {
             self.work_available.notify_one();
-            response_rx.await.map_err(|_| anyhow::anyhow!("Query execution failed"))
+            response_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("Query execution failed"))
         } else {
             Err(anyhow::anyhow!("Executor channel closed"))
         }
@@ -763,6 +875,7 @@ impl AsyncPgliteExecutor {
 
 impl Drop for PgliteRuntime {
     fn drop(&mut self) {
+        cleanup_prefix_dir();
         if let Some(ref tmp_dir) = self.memory_tmp_dir {
             if let Err(e) = std::fs::remove_dir_all(tmp_dir) {
                 eprintln!("[WARNING] Failed to clean up temp dir {:?}: {}", tmp_dir, e);
@@ -879,10 +992,6 @@ fn ensure_server_version(response: Vec<u8>, has_sent_server_version: &mut bool) 
     }
 }
 
-fn response_has_ready_for_query(response: &[u8]) -> bool {
-    WireMessageIter::new(response).any(|msg| msg.msg_type == b'Z')
-}
-
 fn message_starts_transaction(data: &[u8]) -> bool {
     if data.is_empty() {
         return false;
@@ -932,10 +1041,7 @@ pub fn handle_connection(mut stream: TcpStream, runtime: Arc<PgliteRuntime>) -> 
             }
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                continue;
-            }
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
             Err(e) => return Err(e).context("Failed to read from client"),
         }
     }
@@ -947,7 +1053,7 @@ pub async fn handle_connection_async(
     stream: tokio::net::TcpStream,
     executor: Arc<AsyncPgliteExecutor>,
 ) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut buf = vec![0u8; 64 * 1024];
     let mut has_sent_server_version = false;
@@ -956,38 +1062,26 @@ pub async fn handle_connection_async(
     reader.set_nodelay(true)?;
 
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-
-        match reader.try_read(&mut buf) {
+        let n = match reader.read(&mut buf).await {
             Ok(0) => break,
-            Ok(n) => {
-                let needs_init = !has_sent_server_version || message_starts_transaction(&buf[..n]);
-
-                if needs_init {
-                    let _permit = WASM_SEMAPHORE.acquire().await;
-                }
-
-                match executor.execute_query(buf[..n].to_vec()).await {
-                    Ok(response) if !response.is_empty() => {
-                        let response =
-                            ensure_server_version(response, &mut has_sent_server_version);
-
-                        if response_has_ready_for_query(&response) {
-                            reader.write_all(&response).await?;
-                            reader.flush().await?;
-                        } else {
-                            reader.write_all(&response).await?;
-                            reader.flush().await?;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                continue;
-            }
+            Ok(n) => n,
             Err(e) => return Err(e).context("Failed to read from client"),
+        };
+
+        let needs_init = !has_sent_server_version || message_starts_transaction(&buf[..n]);
+
+        if needs_init {
+            let _permit = WASM_SEMAPHORE.acquire().await;
+        }
+
+        match executor.execute_query(buf[..n].to_vec()).await {
+            Ok(response) if !response.is_empty() => {
+                let response = ensure_server_version(response, &mut has_sent_server_version);
+                reader.write_all(&response).await?;
+                reader.flush().await?;
+            }
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
 
@@ -1027,8 +1121,8 @@ mod tests {
         let _config = PgliteConfig {
             data_dir: PathBuf::from("/tmp/test"),
             tcp_port: 54321,
-            wasm_path: PathBuf::from("/path/to/pglite.wasi"),
-            prefix_dir: PathBuf::from("/path/to/prefix"),
+            wasm_path: Some(PathBuf::from("/path/to/pglite.wasi")),
+            prefix_dir: Some(PathBuf::from("/path/to/prefix")),
             pgdata_seed_path: None,
         };
     }
@@ -1038,8 +1132,8 @@ mod tests {
         let config = PgliteConfig {
             data_dir: std::env::temp_dir().join("test_missing_wasm"),
             tcp_port: 55600,
-            wasm_path: PathBuf::from("/nonexistent/pglite.wasi"),
-            prefix_dir: PathBuf::from("/tmp"),
+            wasm_path: Some(PathBuf::from("/nonexistent/pglite.wasi")),
+            prefix_dir: Some(PathBuf::from("/tmp")),
             pgdata_seed_path: None,
         };
 
@@ -1468,5 +1562,167 @@ mod tests {
         let response = create_error_response_from_trap(trap_error);
 
         assert_eq!(extract_error_code(&response), Some("42601".to_string()));
+    }
+
+    // Priority detection tests
+    fn create_simple_query_message(sql: &str) -> Vec<u8> {
+        // Simple Query protocol: 'Q' + length (4 bytes) + query string + null terminator
+        let query_bytes = sql.as_bytes();
+        let len = (4 + query_bytes.len() + 1) as u32; // length includes itself + query + null
+
+        let mut msg = Vec::new();
+        msg.push(b'Q');
+        msg.extend_from_slice(&len.to_be_bytes());
+        msg.extend_from_slice(query_bytes);
+        msg.push(0); // null terminator
+        msg
+    }
+
+    fn create_parse_message(statement_name: &str, sql: &str) -> Vec<u8> {
+        // Parse message: 'P' + length + statement_name + null + query + null + param_count (2 bytes)
+        let name_bytes = statement_name.as_bytes();
+        let query_bytes = sql.as_bytes();
+        let len = (4 + name_bytes.len() + 1 + query_bytes.len() + 1 + 2) as u32;
+
+        let mut msg = Vec::new();
+        msg.push(b'P');
+        msg.extend_from_slice(&len.to_be_bytes());
+        msg.extend_from_slice(name_bytes);
+        msg.push(0); // null terminator for name
+        msg.extend_from_slice(query_bytes);
+        msg.push(0); // null terminator for query
+        msg.extend_from_slice(&0u16.to_be_bytes()); // zero parameters
+        msg
+    }
+
+    #[test]
+    fn test_detect_priority_commit_simple_query() {
+        let msg = create_simple_query_message("COMMIT");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_commit_lowercase() {
+        let msg = create_simple_query_message("commit");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_commit_mixed_case() {
+        let msg = create_simple_query_message("CoMmIt");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_rollback() {
+        let msg = create_simple_query_message("ROLLBACK");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_end_transaction() {
+        let msg = create_simple_query_message("END");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_abort() {
+        let msg = create_simple_query_message("ABORT");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_savepoint() {
+        let msg = create_simple_query_message("SAVEPOINT my_savepoint");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_release_savepoint() {
+        let msg = create_simple_query_message("RELEASE SAVEPOINT my_savepoint");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_select_is_normal() {
+        let msg = create_simple_query_message("SELECT * FROM users");
+        assert_eq!(detect_priority(&msg), QueryPriority::Normal);
+    }
+
+    #[test]
+    fn test_detect_priority_insert_is_normal() {
+        let msg = create_simple_query_message("INSERT INTO users (name) VALUES ('test')");
+        assert_eq!(detect_priority(&msg), QueryPriority::Normal);
+    }
+
+    #[test]
+    fn test_detect_priority_update_is_normal() {
+        let msg = create_simple_query_message("UPDATE users SET name = 'test'");
+        assert_eq!(detect_priority(&msg), QueryPriority::Normal);
+    }
+
+    #[test]
+    fn test_detect_priority_delete_is_normal() {
+        let msg = create_simple_query_message("DELETE FROM users WHERE id = 1");
+        assert_eq!(detect_priority(&msg), QueryPriority::Normal);
+    }
+
+    #[test]
+    fn test_detect_priority_begin_is_normal() {
+        // BEGIN starts a transaction but doesn't need priority - it's COMMIT/ROLLBACK that do
+        let msg = create_simple_query_message("BEGIN");
+        assert_eq!(detect_priority(&msg), QueryPriority::Normal);
+    }
+
+    #[test]
+    fn test_detect_priority_commit_with_whitespace() {
+        let msg = create_simple_query_message("  COMMIT  ");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_rollback_to_savepoint() {
+        let msg = create_simple_query_message("ROLLBACK TO SAVEPOINT my_savepoint");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_parse_message_commit() {
+        let msg = create_parse_message("", "COMMIT");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_parse_message_select() {
+        let msg = create_parse_message("stmt1", "SELECT * FROM users WHERE id = $1");
+        assert_eq!(detect_priority(&msg), QueryPriority::Normal);
+    }
+
+    #[test]
+    fn test_detect_priority_parse_message_rollback() {
+        let msg = create_parse_message("rollback_stmt", "ROLLBACK");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
+    }
+
+    #[test]
+    fn test_detect_priority_empty_data() {
+        assert_eq!(detect_priority(&[]), QueryPriority::Normal);
+    }
+
+    #[test]
+    fn test_detect_priority_short_data() {
+        assert_eq!(detect_priority(&[b'Q', 0, 0]), QueryPriority::Normal);
+    }
+
+    #[test]
+    fn test_detect_priority_unknown_message_type() {
+        let msg = vec![b'X', 0, 0, 0, 5, b'Q'];
+        assert_eq!(detect_priority(&msg), QueryPriority::Normal);
+    }
+
+    #[test]
+    fn test_detect_priority_commit_semicolon() {
+        let msg = create_simple_query_message("COMMIT;");
+        assert_eq!(detect_priority(&msg), QueryPriority::High);
     }
 }

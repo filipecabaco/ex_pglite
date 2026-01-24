@@ -35,6 +35,36 @@ defmodule Benchmark.Config do
       read_write_ratio: 0.5,
       transaction_probability: 0.5,
       batch_size: 10
+    },
+    extreme: %{
+      ops_per_second: 2000,
+      read_write_ratio: 0.33,
+      transaction_probability: 0.33,
+      batch_size: 50
+    },
+    max: %{
+      ops_per_second: 10000,
+      read_write_ratio: 0.33,
+      transaction_probability: 0.33,
+      batch_size: 100
+    },
+    reads_only: %{
+      ops_per_second: 10000,
+      read_write_ratio: 1.0,
+      transaction_probability: 0.0,
+      batch_size: 100
+    },
+    writes_only: %{
+      ops_per_second: 10000,
+      read_write_ratio: 0.0,
+      transaction_probability: 0.0,
+      batch_size: 100
+    },
+    transactions_only: %{
+      ops_per_second: 10000,
+      read_write_ratio: 0.0,
+      transaction_probability: 1.0,
+      batch_size: 100
     }
   }
 
@@ -123,5 +153,10 @@ defmodule Benchmark.Config do
   defp parse_intensity("low"), do: :low
   defp parse_intensity("medium"), do: :medium
   defp parse_intensity("high"), do: :high
+  defp parse_intensity("extreme"), do: :extreme
+  defp parse_intensity("max"), do: :max
+  defp parse_intensity("reads_only"), do: :reads_only
+  defp parse_intensity("writes_only"), do: :writes_only
+  defp parse_intensity("transactions_only"), do: :transactions_only
   defp parse_intensity(_), do: :medium
 end

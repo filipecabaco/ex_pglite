@@ -1,4 +1,4 @@
-.PHONY: all clean install standalone
+.PHONY: all clean install standalone build-release build-release-compressed build-all test compare-sizes help
 
 BINARY_NAME=pglite_port
 BIN_DIR=../priv/bin
@@ -99,6 +99,60 @@ standalone:
 	@echo "=== Standalone build complete! ==="
 	@echo "Directory: $(STANDALONE_DIR)/"
 	@echo "See $(STANDALONE_DIR)/README.md for usage instructions."
+
+build-release:
+	@echo "Building optimized release binary..."
+	cargo build --release
+	strip target/release/$(BINARY_NAME)
+	@echo "Binary built: target/release/$(BINARY_NAME)"
+
+build-release-compressed: build-release
+	@echo "Compressing binary with UPX..."
+	upx --best --lzma target/release/$(BINARY_NAME)
+	mv target/release/$(BINARY_NAME) target/release/$(BINARY_NAME)_compressed
+	@echo "Compressed binary built: target/release/$(BINARY_NAME)_compressed"
+
+build-all: build-release build-release-compressed
+
+test:
+	cargo test
+
+compare-sizes:
+	@echo "=== Binary Sizes ==="
+	@if [ -f target/release/$(BINARY_NAME) ]; then \
+		ls -lh target/release/$(BINARY_NAME) | awk '{print "Uncompressed: " $$5 " (" $$9 ")"}'; \
+	fi
+	@if [ -f target/release/$(BINARY_NAME)_compressed ]; then \
+		ls -lh target/release/$(BINARY_NAME)_compressed | awk '{print "Compressed: " $$5 " (" $$9 ")"}'; \
+	fi
+	@echo ""
+	@echo "=== Disk Usage ==="
+	@du -sh target/release/$(BINARY_NAME)* 2>/dev/null || echo "No release builds found"
+
+help:
+	@echo "PGlite Port Build Targets"
+	@echo ""
+	@echo "Standard Targets:"
+	@echo "  all           - Build and install binary to priv/bin"
+	@echo "  install       - Build release binary and install to priv/bin"
+	@echo "  standalone    - Create standalone distribution with external assets"
+	@echo ""
+	@echo "Single Binary Distribution (New):"
+	@echo "  build-release           - Build optimized release binary (~83MB)"
+	@echo "  build-release-compressed - Build UPX-compressed release binary (~41-58MB)"
+	@echo "  build-all               - Build both release variants"
+	@echo ""
+	@echo "Testing & Maintenance:"
+	@echo "  test          - Run all tests"
+	@echo "  clean         - Clean build artifacts"
+	@echo "  compare-sizes - Show binary sizes and disk usage"
+	@echo "  help         - Show this help message"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make standalone            # Build standalone distribution (original method)"
+	@echo "  make build-release         # Build single binary with embedded assets"
+	@echo "  make build-release-compressed  # Build compressed single binary"
+	@echo "  make build-all            # Build both variants"
 
 clean:
 	@echo "Cleaning PGlite port..."
