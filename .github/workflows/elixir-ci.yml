@@ -1,0 +1,92 @@
+name: Elixir CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+env:
+  MIX_ENV: test
+
+jobs:
+  test:
+    name: Credo, Dialyzer, and Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache downloaded assets
+        uses: actions/cache@v4
+        with:
+          path: assets/pglite_npm
+          key: assets/pglite-npm-${{ hashFiles('pglited/Cargo.lock') }}
+          restore-keys: |
+            assets/pglite-npm-
+
+      - name: Set up Elixir
+        uses: erlef/setup-elixir@v1
+        with:
+          elixir-version: 1.15.3
+          otp-version: 26.2.5
+
+      - name: Cache Mix artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            _build
+            deps
+            ~/.hex
+            ~/.cache/rebar3
+          key: mix-cache-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            mix-cache-${{ runner.os }}-
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+
+      - name: Cache Cargo registry & git sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-registry-${{ hashFiles('pglited/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-registry-
+
+      - name: Cache PGlite cargo target
+        uses: actions/cache@v4
+        with:
+          path: pglited/target
+          key: cargo-target-${{ runner.os }}-${{ hashFiles('pglited/Cargo.lock') }}
+          restore-keys: |
+            cargo-target-${{ runner.os }}-
+
+      - name: Prepare Mix toolchain
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Compile dependencies
+        run: mix deps.compile
+
+      - name: Run Credo
+        run: mix credo --strict
+
+      - name: Run Dialyzer
+        run: mix dialyzer --halt-exit-status
+
+      - name: Run tests with fresh Rust binary
+        run: mix test

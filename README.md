@@ -86,6 +86,37 @@ defmodule MyTest do
 end
 ```
 
+## Aligning with CI checks locally
+
+CI for this project is defined in `.github/workflows/elixir-ci.yml`, which installs Elixir 1.15.3 / OTP 26.3, the stable Rust toolchain, and then runs Credo, Dialyzer, and `mix test` inside `MIX_ENV=test`. To reproduce those steps on your machine:
+
+1. **Set up the toolchain** – install `elixir`/`otp` at the versions above (via `asdf`, `asdf-erlang`, Homebrew, etc.) and use `rustup toolchain install stable` so the Rust side matches the GitHub Actions job.
+2. **Bootstrap Mix**
+   ```bash
+   mix local.hex --force
+   mix local.rebar --force
+   mix deps.get
+   mix deps.compile
+   ```
+3. **Run the checks**
+   ```bash
+   MIX_ENV=test mix credo --strict
+   MIX_ENV=test mix dialyzer --halt-exit-status
+   MIX_ENV=test mix test
+   ```
+
+### Caching considerations
+
+To keep the local runs fast and in sync with the workflow, reuse the same directories that are cached on CI:
+
+- `assets/pglite_npm` (the workflow caches generated frontend assets keyed by `pglited/Cargo.lock`)
+- Mix artifacts: `_build`, `deps`, `~/.hex`, and `~/.cache/rebar3`
+- Rust artifacts: `pglited/target`, `~/.cargo/registry`, and `~/.cargo/git`
+
+Avoid deleting those folders between runs unless you intentionally want a clean slate. When packages or `Cargo.lock`/`mix.lock` change, rerun the bootstrap commands above so the cache entries stay valid.
+
+If you prefer, wrap the commands above in a script so you can quickly rerun Credo + Dialyzer + tests just like the CI job does. Always run them from the repository root so the hashes used by Actions (`mix.lock`, `pglited/Cargo.lock`) stay consistent.
+
 ## Building from Source
 
 ```bash
@@ -134,6 +165,17 @@ Set `PGLITE_DEBUG=1` to enable verbose logging from the Rust runtime:
 ```bash
 PGLITE_DEBUG=1 mix test
 ```
+
+## Benchmarks
+
+Extreme profile (ops target 2000/s) for 5 minutes on simple schema (1000 rows), 1 instance:
+
+| Persistence | Pool size | Ops/s | P95 latency (ms) |
+|-------------|-----------|-------|------------------|
+| memory      | 1         | 369.0 | 18.61            |
+| memory      | 20        | 350.1 | 16.61            |
+| file        | 1         | 369.5 | 15.87            |
+| file        | 20        | 373.1 | 16.61            |
 
 ## License
 

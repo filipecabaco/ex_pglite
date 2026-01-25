@@ -11,7 +11,8 @@ defmodule Pglite.MixProject do
       deps: deps(),
       package: package(),
       description: "Elixir library for PGLite - lightweight PostgreSQL with Postgrex integration",
-      aliases: aliases()
+      aliases: aliases(),
+      dialyzer: [plt_add_apps: [:mix]]
     ]
   end
 
