@@ -14,7 +14,8 @@ defmodule Benchmark.Config do
     :output_file,
     :operations,
     :cooldown_seconds,
-    :startup_timeout_seconds
+    :startup_timeout_seconds,
+    :pool_size
   ]
 
   @intensity_profiles %{
@@ -35,6 +36,36 @@ defmodule Benchmark.Config do
       read_write_ratio: 0.5,
       transaction_probability: 0.5,
       batch_size: 10
+    },
+    extreme: %{
+      ops_per_second: 2000,
+      read_write_ratio: 0.33,
+      transaction_probability: 0.33,
+      batch_size: 50
+    },
+    max: %{
+      ops_per_second: 10000,
+      read_write_ratio: 0.33,
+      transaction_probability: 0.33,
+      batch_size: 100
+    },
+    reads_only: %{
+      ops_per_second: 10000,
+      read_write_ratio: 1.0,
+      transaction_probability: 0.0,
+      batch_size: 100
+    },
+    writes_only: %{
+      ops_per_second: 10000,
+      read_write_ratio: 0.0,
+      transaction_probability: 0.0,
+      batch_size: 100
+    },
+    transactions_only: %{
+      ops_per_second: 10000,
+      read_write_ratio: 0.0,
+      transaction_probability: 1.0,
+      batch_size: 100
     }
   }
 
@@ -55,7 +86,8 @@ defmodule Benchmark.Config do
       output_file: Keyword.get(opts, :output_file, nil),
       operations: Keyword.get(opts, :operations, [:read, :write, :transaction]),
       cooldown_seconds: Keyword.get(opts, :cooldown_seconds, 0),
-      startup_timeout_seconds: Keyword.get(opts, :startup_timeout_seconds, default_startup_timeout)
+      startup_timeout_seconds: Keyword.get(opts, :startup_timeout_seconds, default_startup_timeout),
+      pool_size: Keyword.get(opts, :pool_size, 1)
     }
   end
 
@@ -79,7 +111,8 @@ defmodule Benchmark.Config do
           sample_interval: :integer,
           output: :string,
           cooldown: :integer,
-          startup_timeout: :integer
+          startup_timeout: :integer,
+          pool_size: :integer
         ],
         aliases: [
           i: :instances,
@@ -90,7 +123,8 @@ defmodule Benchmark.Config do
           n: :intensity,
           o: :output,
           c: :cooldown,
-          t: :startup_timeout
+          t: :startup_timeout,
+          P: :pool_size
         ]
       )
 
@@ -107,7 +141,8 @@ defmodule Benchmark.Config do
       sample_interval_ms: Keyword.get(opts, :sample_interval, 1000),
       output_file: Keyword.get(opts, :output),
       cooldown_seconds: Keyword.get(opts, :cooldown, 0),
-      startup_timeout_seconds: Keyword.get(opts, :startup_timeout, default_startup_timeout)
+      startup_timeout_seconds: Keyword.get(opts, :startup_timeout, default_startup_timeout),
+      pool_size: Keyword.get(opts, :pool_size, 1)
     )
   end
 
@@ -123,5 +158,10 @@ defmodule Benchmark.Config do
   defp parse_intensity("low"), do: :low
   defp parse_intensity("medium"), do: :medium
   defp parse_intensity("high"), do: :high
+  defp parse_intensity("extreme"), do: :extreme
+  defp parse_intensity("max"), do: :max
+  defp parse_intensity("reads_only"), do: :reads_only
+  defp parse_intensity("writes_only"), do: :writes_only
+  defp parse_intensity("transactions_only"), do: :transactions_only
   defp parse_intensity(_), do: :medium
 end

@@ -19,7 +19,6 @@ defmodule MultiplePortsIsolatedTest do
     {:ok, pid2} = Pglite.start_link(tcp_port: port2, memory: true, data_dir: Path.join(tmp_dir, "db2"))
     {:ok, pid3} = Pglite.start_link(tcp_port: port3, memory: true, data_dir: Path.join(tmp_dir, "db3"))
 
-
     on_exit(fn ->
       safe_stop(pid1)
       safe_stop(pid2)
@@ -34,7 +33,6 @@ defmodule MultiplePortsIsolatedTest do
     assert conn_opts2[:port] == port2
     assert conn_opts3[:port] == port3
 
-
     {:ok, conn1} = Postgrex.start_link(conn_opts1)
     {:ok, conn2} = Postgrex.start_link(conn_opts2)
     {:ok, conn3} = Postgrex.start_link(conn_opts3)
@@ -44,16 +42,13 @@ defmodule MultiplePortsIsolatedTest do
       safe_stop(conn3)
     end)
 
-
     {:ok, _} = Postgrex.query(conn1, "CREATE TABLE users (id int, name text)", [])
     {:ok, _} = Postgrex.query(conn2, "CREATE TABLE products (id int, price decimal)", [])
     {:ok, _} = Postgrex.query(conn3, "CREATE TABLE orders (id int, total decimal)", [])
 
-
     {:ok, _} = Postgrex.query(conn1, "INSERT INTO users VALUES (1, 'Alice')", [])
     {:ok, _} = Postgrex.query(conn2, "INSERT INTO products VALUES (1, 99.99)", [])
     {:ok, _} = Postgrex.query(conn3, "INSERT INTO orders VALUES (1, 149.99)", [])
-
 
     {:ok, result1} = Postgrex.query(conn1, "SELECT * FROM users", [])
     assert [[1, "Alice"]] = result1.rows
@@ -66,12 +61,9 @@ defmodule MultiplePortsIsolatedTest do
     assert [[1, total]] = result3.rows
     assert Decimal.equal?(total, Decimal.new("149.99"))
 
-
     {:error, _} = Postgrex.query(conn1, "SELECT * FROM products", [])
     {:error, _} = Postgrex.query(conn2, "SELECT * FROM orders", [])
     {:error, _} = Postgrex.query(conn3, "SELECT * FROM users", [])
-
-
   end
 
   test "different instances can use same table names without conflict", %{tmp_dir: tmp_dir} do
@@ -98,7 +90,6 @@ defmodule MultiplePortsIsolatedTest do
     {:ok, _} = Postgrex.query(conn1, "CREATE TABLE test (id int, value text)", [])
     {:ok, _} = Postgrex.query(conn2, "CREATE TABLE test (id int, value text)", [])
 
-
     {:ok, _} = Postgrex.query(conn1, "INSERT INTO test VALUES (1, 'database1')", [])
     {:ok, _} = Postgrex.query(conn2, "INSERT INTO test VALUES (2, 'database2')", [])
 
@@ -107,7 +98,5 @@ defmodule MultiplePortsIsolatedTest do
 
     {:ok, result2} = Postgrex.query(conn2, "SELECT * FROM test", [])
     assert [[2, "database2"]] = result2.rows
-
-
   end
 end

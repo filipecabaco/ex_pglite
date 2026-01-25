@@ -11,7 +11,8 @@ defmodule Pglite.MixProject do
       deps: deps(),
       package: package(),
       description: "Elixir library for PGLite - lightweight PostgreSQL with Postgrex integration",
-      aliases: aliases()
+      aliases: aliases(),
+      dialyzer: [plt_add_apps: [:mix]]
     ]
   end
 
@@ -29,13 +30,11 @@ defmodule Pglite.MixProject do
       name: "ex_pglite",
       files: [
         "lib",
-        "priv/pgdata_seed.tar.zst",
-        "priv/pglite.cwasm",
-        "priv/pglite.wasi",
-        "priv/pglite_prefix",
-        "pglite_port/src",
-        "pglite_port/Cargo.toml",
-        "pglite_port/Makefile",
+        "pglited/src",
+        "pglited/assets",
+        "pglited/Cargo.toml",
+        "pglited/Makefile",
+        "pglited/build.rs",
         "mix.exs",
         "Makefile",
         "README.md",

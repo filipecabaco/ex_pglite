@@ -28,7 +28,7 @@ defmodule PortConfigurationTest do
     {:ok, pid} = Pglite.start_link(memory: true, data_dir: Path.join(tmp_dir, "db"), startup_timeout: 60_000)
     on_exit(fn -> safe_stop(pid) end)
     conn_opts = Pglite.get_connection_opts(pid)
-    assert conn_opts[:port] == 54321
+    assert conn_opts[:port] == 54_321
   end
 
   test "multiple instances can be configured with different ports", %{tmp_dir: tmp_dir, port: port1} do

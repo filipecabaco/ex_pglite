@@ -100,6 +100,7 @@ defmodule Benchmark.Orchestrator do
     IO.puts("  Schema:          #{config.schema_type}")
     IO.puts("  Data rows:       #{config.data_rows}")
     IO.puts("  Intensity:       #{config.intensity}")
+    IO.puts("  Pool size:       #{config.pool_size}")
     IO.puts("  Sample interval: #{config.sample_interval_ms}ms")
     IO.puts("  Cooldown:        #{config.cooldown_seconds}s")
     IO.puts("  Startup timeout: #{config.startup_timeout_seconds}s")
@@ -227,6 +228,8 @@ defmodule Benchmark.Orchestrator do
       max(2, System.schedulers_online())
     )
 
+    pool_size = state.config.pool_size
+
     results =
       indexed_instances
       |> Task.async_stream(
@@ -234,6 +237,7 @@ defmodule Benchmark.Orchestrator do
           start_time = System.monotonic_time(:millisecond)
 
           conn_opts = Pglite.get_connection_opts(pglite_pid)
+          conn_opts = Keyword.put(conn_opts, :pool_size, pool_size)
           {:ok, conn} = Postgrex.start_link(conn_opts)
           Process.unlink(conn)
 

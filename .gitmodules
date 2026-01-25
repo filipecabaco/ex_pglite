@@ -1,0 +1,3 @@
+[submodule "pglited"]
+	path = pglited
+	url = git@github.com:filipecabaco/pglited.git
