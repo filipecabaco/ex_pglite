@@ -168,14 +168,16 @@ PGLITE_DEBUG=1 mix test
 
 ## Benchmarks
 
-Extreme profile (ops target 2000/s) for 5 minutes on simple schema (1000 rows), 1 instance:
+Extreme intensity profile (2000 ops/s target, 33/33/33 read/write/transaction mix) on simple schema with 1000 rows, 1 instance, 60s duration:
 
-| Persistence | Pool size | Ops/s | P95 latency (ms) |
-|-------------|-----------|-------|------------------|
-| memory      | 1         | 369.0 | 18.61            |
-| memory      | 20        | 350.1 | 16.61            |
-| file        | 1         | 369.5 | 15.87            |
-| file        | 20        | 373.1 | 16.61            |
+| Persistence | Pool Size | Ops/s | Reads/s | Writes/s | Txn/s | P50 (ms) | P95 (ms) | P99 (ms) | Avg CPU | Peak Mem |
+|-------------|-----------|-------|---------|----------|-------|----------|----------|----------|---------|----------|
+| memory      | 1         | 891   | 198     | 398      | 295   | 1.07     | 3.84     | 6.10     | 52%     | 872 MB   |
+| memory      | 20        | 724   | 158     | 326      | 241   | 1.07     | 3.63     | 4.92     | 51%     | 756 MB   |
+| file        | 1         | 925   | 202     | 418      | 305   | 0.98     | 2.93     | 3.63     | 49%     | 644 MB   |
+| file        | 20        | 834   | 182     | 376      | 276   | 1.02     | 3.02     | 4.01     | 47%     | 592 MB   |
+
+Pool size 1 is optimal because PGlite runs single-threaded WebAssembly with a semaphore-enforced serial execution model. Larger pools add contention overhead with no parallelism benefit. Run benchmarks yourself with `mix pglite.benchmark -n extreme -p memory -P 1`.
 
 ## License
 
